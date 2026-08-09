@@ -1,6 +1,30 @@
+
 spring:
   application:
     name: pulseguard-control-api
+
+  datasource:
+    # connectionTimeZone/preserveInstants keep Instant values round-tripping as
+    # true UTC regardless of the server's or the JVM's local zone.
+    url: "${DB_URL:jdbc:mysql://localhost:3306/pulseguard?connectionTimeZone=UTC&preserveInstants=true}"
+    username: ${DB_USERNAME:}
+    password: ${DB_PASSWORD:}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+
+  jpa:
+    # Flyway owns the schema. Hibernate only checks that the mappings agree
+    # with it, and startup fails loudly if they have drifted apart.
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
 
 server:
   port: ${SERVER_PORT:8080}
