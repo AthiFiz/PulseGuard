@@ -1,7 +1,7 @@
 # PulseGuard Architecture
 
-This document describes the architecture as it stands at **Stage 1 — Project
-Foundation**, and the shape it is intended to grow into.
+This document describes the architecture as it stands at **Stage 2 — MySQL
+Database Foundation**, and the shape it is intended to grow into.
 
 Anything marked **[NOT YET IMPLEMENTED]** does not exist in the codebase.
 
@@ -51,6 +51,8 @@ Implemented today:
 - `GET /actuator/health`
 - `GET /api/v1/system/info`
 - configurable CORS for local frontend development
+- **ownership of the PulseGuard relational schema**: Flyway migrations, JPA
+  entities, and Spring Data repositories
 
 Future responsibilities **[NOT YET IMPLEMENTED]**:
 
@@ -59,6 +61,9 @@ Future responsibilities **[NOT YET IMPLEMENTED]**:
 - monitor configuration
 - incident APIs
 - dashboard and reporting queries
+
+Note that the entities and repositories exist but no code reads or writes them
+yet — no service layer and no business REST endpoints have been built.
 
 ### Monitor Worker
 
@@ -71,7 +76,10 @@ Implemented today:
 - `GET /api/v1/system/info`
 
 It contains no monitoring logic whatsoever — no scheduling, no HTTP checking, no
-persistence.
+persistence. It has **no database dependencies at all**: no Spring Data JPA, no
+MySQL driver, no Flyway, no entities. Adding them now would duplicate the schema
+across two independent Maven projects for no benefit, so worker database access
+is deferred to the stage that actually needs it.
 
 Future responsibilities **[NOT YET IMPLEMENTED]**:
 
@@ -115,7 +123,7 @@ are **[NOT YET IMPLEMENTED]** and belong to a much later stage.
 
 ---
 
-## Current Architecture (Stage 1)
+## Current Architecture (Stage 2)
 
 ```text
                      ┌──────────────────┐
@@ -128,13 +136,21 @@ are **[NOT YET IMPLEMENTED]** and belong to a much later stage.
                      ┌──────────────────┐
                      │   Control API    │
                      │ localhost:8080   │
-                     └──────────────────┘
-
-
+                     └────────┬─────────┘
+                              │
+                              │ JDBC
+                              ▼
                      ┌──────────────────┐
-                     │ Monitor Worker   │
-                     │ localhost:8081   │
+                     │      MySQL       │
+                     │    pulseguard    │
                      └──────────────────┘
+
+
+                     ┌──────────────────────────────┐
+                     │       Monitor Worker         │
+                     │       localhost:8081         │
+                     │ [database access deferred]   │
+                     └──────────────────────────────┘
 ```
 
 ---
@@ -181,24 +197,65 @@ are **[NOT YET IMPLEMENTED]** and belong to a much later stage.
 
 ## Database
 
-**MySQL** is the selected relational database for PulseGuard.
+**MySQL 8** is the relational database for PulseGuard. Production will
+eventually use **Amazon RDS for MySQL**; local development uses a locally
+installed MySQL server.
 
-Local development will use a MySQL container, integration tests will use MySQL
-Testcontainers, and production will eventually use **Amazon RDS for MySQL**.
+### Schema ownership
 
-No database of any kind has been added yet — that is Task 02.
+The **Control API owns the schema**. All Flyway migrations and JPA entities live
+in `control-api`, and no other application defines or migrates tables. Because
+the two backend applications are independent Maven projects with no shared
+module, putting migrations in both would mean duplicating them — so a single
+owner is the only sane arrangement. When the Monitor Worker eventually needs
+database access, it will connect to the same schema without owning it.
+
+### Flyway, not Hibernate
+
+Flyway is the sole authority on schema structure. It runs automatically on
+Control API startup and applies versioned SQL migrations from
+`classpath:db/migration`.
+
+Hibernate runs with `ddl-auto=validate`: it never creates, drops, or alters
+anything, and it fails startup if the entity mappings disagree with the migrated
+schema. That disagreement is caught at boot rather than at the first query.
+
+### Tables
+
+```text
+users             accounts; unique email
+projects          monitor groupings; created_by -> users
+project_members   user/project membership; unique (project_id, user_id)
+monitors          monitored endpoints and their configuration and state
+monitor_checks    the result of each individual check
+```
+
+All tables are InnoDB / utf8mb4, use `snake_case` naming, and use
+`BIGINT AUTO_INCREMENT` primary keys. Timestamps are `DATETIME(6)` and are
+handled as UTC `Instant` values in Java. Enums are stored as `VARCHAR` strings
+rather than MySQL `ENUM` columns, so adding a value is an application change
+rather than a schema migration.
+
+### Testing
+
+There is deliberately **no database integration-test scope** in this project.
+The automated tests are fast and need no infrastructure. Schema correctness is
+verified by starting the Control API against MySQL, where Flyway migration and
+Hibernate validation both run.
 
 ---
 
-## Technology Notes (Stage 1)
+## Technology Notes (Stage 2)
 
-| Area          | Choice                                                   |
-| ------------- | -------------------------------------------------------- |
-| Language      | Java 21                                                   |
-| Backend       | Spring Boot 4.1.0 (Web MVC, Actuator, Bean Validation)    |
-| Build         | Maven, via the Maven Wrapper in each project              |
-| Frontend      | React 19, TypeScript, Vite 6                              |
-| Frontend HTTP | the browser `fetch` API — no HTTP client library          |
+| Area          | Choice                                                          |
+| ------------- | --------------------------------------------------------------- |
+| Language      | Java 21                                                          |
+| Backend       | Spring Boot 4.1.0 (Web MVC, Actuator, Bean Validation)           |
+| Persistence   | Spring Data JPA / Hibernate, MySQL Connector/J, Flyway (control-api only) |
+| Boilerplate   | Lombok, for getters/setters on entities                          |
+| Build         | Maven, via the Maven Wrapper in each project                     |
+| Frontend      | React 19, TypeScript, Vite 6                                     |
+| Frontend HTTP | the browser `fetch` API — no HTTP client library                 |
 
 The two backend projects are independent Maven projects rather than modules of a
 shared parent, so each can be opened and built on its own in an IDE.
