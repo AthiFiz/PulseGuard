@@ -1,0 +1,12 @@
+spring:
+  application:
+    name: pulseguard-monitor-worker
+
+server:
+  port: ${SERVER_PORT:8081}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health

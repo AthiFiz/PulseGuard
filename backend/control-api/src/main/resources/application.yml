@@ -1,0 +1,16 @@
+spring:
+  application:
+    name: pulseguard-control-api
+
+server:
+  port: ${SERVER_PORT:8080}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+
+app:
+  cors:
+    allowed-origins: ${FRONTEND_ORIGIN:http://localhost:5173}
