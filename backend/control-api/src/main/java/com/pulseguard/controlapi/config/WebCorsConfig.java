@@ -1,7 +1,7 @@
 package com.pulseguard.controlapi.config;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.web.servlet.config.annotation.CorsRegistry;
@@ -15,15 +15,11 @@ import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
  */
 @Configuration
 @EnableConfigurationProperties(CorsProperties.class)
+@RequiredArgsConstructor
+@Slf4j
 public class WebCorsConfig implements WebMvcConfigurer {
 
-    private static final Logger log = LoggerFactory.getLogger(WebCorsConfig.class);
-
     private final CorsProperties corsProperties;
-
-    public WebCorsConfig(CorsProperties corsProperties) {
-        this.corsProperties = corsProperties;
-    }
 
     @Override
     public void addCorsMappings(CorsRegistry registry) {
