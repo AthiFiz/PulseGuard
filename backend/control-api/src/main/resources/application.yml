@@ -7,8 +7,8 @@ spring:
     # connectionTimeZone/preserveInstants keep Instant values round-tripping as
     # true UTC regardless of the server's or the JVM's local zone.
     url: "${DB_URL:jdbc:mysql://localhost:3306/pulseguard?connectionTimeZone=UTC&preserveInstants=true}"
-    username: ${DB_USERNAME:}
-    password: ${DB_PASSWORD:}
+    username: ${DB_USERNAME:root}
+    password: "${DB_PASSWORD:Ayana2019@}"
     driver-class-name: com.mysql.cj.jdbc.Driver
 
   jpa:
@@ -38,3 +38,11 @@ management:
 app:
   cors:
     allowed-origins: ${FRONTEND_ORIGIN:http://localhost:5173}
+
+  jwt:
+    # Local development secret, committed deliberately so the application runs
+    # with no environment setup. Override with JWT_SECRET anywhere real, and
+    # generate a fresh one with: openssl rand -base64 32
+    secret: ${JWT_SECRET:KI48kUwS4YmFemZujyzzCwZw0xFfZpIaaVwY86jvaYc=}
+    expiration: ${JWT_EXPIRATION:PT1H}
+    issuer: ${JWT_ISSUER:pulseguard-control-api}

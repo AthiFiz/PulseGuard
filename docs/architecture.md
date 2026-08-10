@@ -1,7 +1,8 @@
 # PulseGuard Architecture
 
-This document describes the architecture as it stands at **Stage 2 — MySQL
-Database Foundation**, and the shape it is intended to grow into.
+This document describes the architecture as it stands at **Stage 3 —
+Authentication and Project Management**, and the shape it is intended to grow
+into.
 
 Anything marked **[NOT YET IMPLEMENTED]** does not exist in the codebase.
 
@@ -48,22 +49,18 @@ REST operations. It is the only backend the frontend talks to.
 
 Implemented today:
 
-- `GET /actuator/health`
-- `GET /api/v1/system/info`
+- `GET /actuator/health` and `GET /api/v1/system/info`
 - configurable CORS for local frontend development
 - **ownership of the PulseGuard relational schema**: Flyway migrations, JPA
   entities, and Spring Data repositories
+- **stateless JWT authentication**: registration, login, and current user
+- **project management**: project CRUD plus membership and role management
 
 Future responsibilities **[NOT YET IMPLEMENTED]**:
 
-- authentication and authorization
-- users, projects, and project membership
 - monitor configuration
 - incident APIs
 - dashboard and reporting queries
-
-Note that the entities and repositories exist but no code reads or writes them
-yet — no service layer and no business REST endpoints have been built.
 
 ### Monitor Worker
 
@@ -123,7 +120,7 @@ are **[NOT YET IMPLEMENTED]** and belong to a much later stage.
 
 ---
 
-## Current Architecture (Stage 2)
+## Current Architecture (Stage 3)
 
 ```text
                      ┌──────────────────┐
@@ -131,27 +128,34 @@ are **[NOT YET IMPLEMENTED]** and belong to a much later stage.
                      │ localhost:5173   │
                      └────────┬─────────┘
                               │
-                              │ HTTP
+                              │ HTTP + Bearer JWT
                               ▼
-                     ┌──────────────────┐
-                     │   Control API    │
-                     │ localhost:8080   │
-                     └────────┬─────────┘
-                              │
-                              │ JDBC
-                              ▼
-                     ┌──────────────────┐
-                     │      MySQL       │
-                     │    pulseguard    │
-                     └──────────────────┘
+                     ┌──────────────────────────────┐
+                     │        Control API           │
+                     │        localhost:8080        │
+                     │                              │
+                     │  ├── Authentication / JWT    │
+                     │  └── Project Management      │
+                     └──────────────┬───────────────┘
+                                    │
+                                    │ JDBC
+                                    ▼
+                     ┌──────────────────────────────┐
+                     │            MySQL             │
+                     │          pulseguard          │
+                     │  users / projects / members  │
+                     └──────────────────────────────┘
 
 
                      ┌──────────────────────────────┐
                      │       Monitor Worker         │
                      │       localhost:8081         │
-                     │ [database access deferred]   │
+                     │  [no database, no security]  │
                      └──────────────────────────────┘
 ```
+
+The frontend does not yet authenticate — it still only calls the public
+`/api/v1/system/info`. The login UI arrives in the frontend stage.
 
 ---
 
@@ -192,6 +196,67 @@ are **[NOT YET IMPLEMENTED]** and belong to a much later stage.
                                       │ [NOT YET ADDED]    │
                                       └────────────────────┘
 ```
+
+---
+
+## Security
+
+### Stateless JWT
+
+Authentication is a signed HS256 access token, validated by Spring Security's
+OAuth2 resource server — signature, expiry, and issuer. No custom JWT filter is
+written and no server-side session is created, so any instance can serve any
+request. This matters later: the Control API is meant to run as several
+Kubernetes replicas behind a load balancer, and sticky sessions would undermine
+that.
+
+Login runs through the standard `AuthenticationManager` →
+`DaoAuthenticationProvider` → `UserDetailsService` chain. Passwords are stored
+with a delegating encoder (bcrypt by default), whose `{id}` prefix leaves room
+to migrate algorithms later without invalidating existing hashes.
+
+The `User` JPA entity does **not** implement `UserDetails`. A separate
+`AuthenticatedUser` record is the security principal, keeping the persistence
+model free of framework interfaces.
+
+### What the token carries — and what it must not
+
+```json
+{ "iss": "...", "sub": "15", "email": "...", "system_role": "USER", "iat": 0, "exp": 0 }
+```
+
+Only stable, platform-wide identity. **Project roles are deliberately excluded.**
+A membership can be granted or revoked at any moment, but a token stays valid
+until it expires; a token asserting `PROJECT_ADMIN` would keep granting that
+power after it had been taken away. So `system_role` becomes a Spring Security
+authority, while project roles are read from `project_members` at the moment
+they are needed.
+
+### Two layers of authorization
+
+| Layer          | Decides                          | Enforced by                    |
+| -------------- | -------------------------------- | ------------------------------ |
+| Filter chain   | authenticated vs anonymous       | `SecurityConfig` URL rules     |
+| Service layer  | which project, and what role     | `ProjectAccessService`         |
+
+Everything not explicitly public is `authenticated()` by default, so a new
+endpoint is never accidentally left open. Project-level checks live in one
+service rather than being repeated per controller.
+
+Non-members get `404` instead of `403` when reading a project, so iterating over
+ids reveals nothing about projects belonging to other people.
+
+### CSRF and CORS
+
+CSRF protection is disabled, which is safe **only because** this API has no
+ambient credentials for a browser to attach automatically: it issues no
+authentication cookie and never authenticates from one. The bearer token must be
+set explicitly by JavaScript that is already bound by the same-origin policy, so
+a cross-site form post simply arrives unauthenticated. Introducing cookie
+authentication later would require re-enabling CSRF.
+
+CORS keeps the configurable origin list from Stage 1 (`FRONTEND_ORIGIN`) and is
+applied through Spring Security. The wildcard origin is never used.
 
 ---
 
@@ -245,13 +310,14 @@ Hibernate validation both run.
 
 ---
 
-## Technology Notes (Stage 2)
+## Technology Notes (Stage 3)
 
 | Area          | Choice                                                          |
 | ------------- | --------------------------------------------------------------- |
 | Language      | Java 21                                                          |
 | Backend       | Spring Boot 4.1.0 (Web MVC, Actuator, Bean Validation)           |
 | Persistence   | Spring Data JPA / Hibernate, MySQL Connector/J, Flyway (control-api only) |
+| Security      | Spring Security + OAuth2 resource server, HS256 JWT (control-api only) |
 | Boilerplate   | Lombok, for getters/setters on entities                          |
 | Build         | Maven, via the Maven Wrapper in each project                     |
 | Frontend      | React 19, TypeScript, Vite 6                                     |
