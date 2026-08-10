@@ -57,6 +57,19 @@ public class ApiException extends RuntimeException {
                 "This user is already a member of the project");
     }
 
+    /**
+     * Used both when a monitor genuinely does not exist and when the caller has
+     * no access to its project, so monitor ids cannot be probed across projects.
+     */
+    public static ApiException monitorNotFound() {
+        return new ApiException(ApiErrorCode.MONITOR_NOT_FOUND, "Monitor not found");
+    }
+
+    /** A configuration rule that Bean Validation annotations cannot express. */
+    public static ApiException monitorValidation(String message) {
+        return new ApiException(ApiErrorCode.MONITOR_VALIDATION_ERROR, message);
+    }
+
     public static ApiException projectRequiresAdmin() {
         return new ApiException(
                 ApiErrorCode.PROJECT_REQUIRES_ADMIN,

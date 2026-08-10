@@ -1,8 +1,7 @@
 # PulseGuard Architecture
 
-This document describes the architecture as it stands at **Stage 3 —
-Authentication and Project Management**, and the shape it is intended to grow
-into.
+This document describes the architecture as it stands at **Stage 4 — Monitor
+Management**, and the shape it is intended to grow into.
 
 Anything marked **[NOT YET IMPLEMENTED]** does not exist in the codebase.
 
@@ -55,10 +54,10 @@ Implemented today:
   entities, and Spring Data repositories
 - **stateless JWT authentication**: registration, login, and current user
 - **project management**: project CRUD plus membership and role management
+- **monitor configuration**: monitor CRUD, pause and resume
 
 Future responsibilities **[NOT YET IMPLEMENTED]**:
 
-- monitor configuration
 - incident APIs
 - dashboard and reporting queries
 
@@ -120,7 +119,7 @@ are **[NOT YET IMPLEMENTED]** and belong to a much later stage.
 
 ---
 
-## Current Architecture (Stage 3)
+## Current Architecture (Stage 4)
 
 ```text
                      ┌──────────────────┐
@@ -135,7 +134,8 @@ are **[NOT YET IMPLEMENTED]** and belong to a much later stage.
                      │        localhost:8080        │
                      │                              │
                      │  ├── Authentication / JWT    │
-                     │  └── Project Management      │
+                     │  ├── Project Management      │
+                     │  └── Monitor Configuration   │
                      └──────────────┬───────────────┘
                                     │
                                     │ JDBC
@@ -156,6 +156,81 @@ are **[NOT YET IMPLEMENTED]** and belong to a much later stage.
 
 The frontend does not yet authenticate — it still only calls the public
 `/api/v1/system/info`. The login UI arrives in the frontend stage.
+
+---
+
+## Monitors: configured, but not yet checked
+
+Stage 4 added everything needed to *describe* a monitor and nothing that acts on
+one. No HTTP request is made to a monitored URL, no `monitor_checks` row is
+written, and no monitor ever becomes `UP` or `DOWN`.
+
+### The handover point is `next_check_at`
+
+Creating or resuming a monitor sets `monitors.next_check_at` to the current UTC
+instant, which means "this monitor is eligible to be checked now". Pausing sets
+it to `NULL`, which means "do not schedule this at all".
+
+**Nothing reads that column yet.** It is written so the queue is already
+populated the moment a worker exists:
+
+```text
+Configured Monitor
+       │
+       │  next_check_at  ← written by the Control API (Stage 4)
+       ▼
+Monitor Worker            [NOT YET IMPLEMENTED — Task 05]
+       │  claims monitors whose next_check_at has passed
+       ▼
+  HTTP Check              [NOT YET IMPLEMENTED]
+       │
+       ▼
+  MonitorCheck            [table exists, no writer]
+       │
+       ▼
+  UP / DOWN, incidents    [NOT YET IMPLEMENTED]
+```
+
+### Why clients cannot set status
+
+The API exposes `pause` and `resume` rather than a general "set status"
+endpoint. `UNKNOWN` and `PAUSED` are statements of intent, which a user is
+entitled to make; `UP` and `DOWN` are conclusions drawn from observation, which
+only the monitoring engine may assert. Resume therefore returns a monitor to
+`UNKNOWN`, never `UP`, and leaves an already-`UP`/`DOWN` monitor untouched so an
+accidental call cannot erase a real observation.
+
+Time comes from an injected `java.time.Clock` rather than `Instant.now()`, which
+keeps scheduling assertions deterministic in tests and gives the worker the same
+seam when it needs to reason about due times.
+
+### Security consideration for Task 05: SSRF
+
+Once the worker starts issuing requests to user-supplied URLs, PulseGuard
+becomes a **server-side request forgery** vector: anyone who can create a
+monitor can make the server issue HTTP requests on their behalf, from inside the
+network, and learn something from the outcome.
+
+Stage 4 validates only that the URL is a syntactically valid `http`/`https` URI
+with a host. That is deliberate — the application makes no requests yet, and
+local addresses are genuinely useful while developing and demonstrating the
+project. **Task 05 must decide how to handle at least the following before the
+first outbound request is made:**
+
+- `localhost` and `127.0.0.0/8`
+- private ranges: `10/8`, `172.16/12`, `192.168/16`
+- link-local `169.254/16`, and especially cloud metadata endpoints such as
+  `169.254.169.254`
+- IPv6 equivalents, including `::1` and unique-local addresses
+- **DNS rebinding** — a hostname that resolves to a public address at validation
+  time and a private one at request time, which means the check must happen at
+  connection time, not at save time
+- **redirects** — a permitted public URL that redirects into private space
+- response size and time limits, so a hostile endpoint cannot exhaust the worker
+
+A reasonable design is an allow/deny policy that is permissive by default in
+local development and restrictive in deployed environments, enforced when the
+connection is opened rather than when the monitor is saved.
 
 ---
 
@@ -291,8 +366,8 @@ schema. That disagreement is caught at boot rather than at the first query.
 users             accounts; unique email
 projects          monitor groupings; created_by -> users
 project_members   user/project membership; unique (project_id, user_id)
-monitors          monitored endpoints and their configuration and state
-monitor_checks    the result of each individual check
+monitors          monitored endpoints, their configuration and current state
+monitor_checks    the result of each individual check [no writer yet]
 ```
 
 All tables are InnoDB / utf8mb4, use `snake_case` naming, and use
@@ -310,7 +385,7 @@ Hibernate validation both run.
 
 ---
 
-## Technology Notes (Stage 3)
+## Technology Notes (Stage 4)
 
 | Area          | Choice                                                          |
 | ------------- | --------------------------------------------------------------- |
