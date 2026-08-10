@@ -12,6 +12,7 @@ import com.pulseguard.controlapi.enums.SystemRole;
 import com.pulseguard.controlapi.security.SecurityErrorResponder;
 import com.pulseguard.controlapi.security.SystemRoleJwtAuthenticationConverter;
 import com.pulseguard.controlapi.service.AuthService;
+import com.pulseguard.controlapi.service.MonitorService;
 import com.pulseguard.controlapi.service.ProjectMemberService;
 import com.pulseguard.controlapi.service.ProjectService;
 import java.time.Instant;
@@ -60,6 +61,9 @@ class SecurityRulesTest {
 
     @MockitoBean
     private ProjectMemberService projectMemberService;
+
+    @MockitoBean
+    private MonitorService monitorService;
 
     @Test
     void systemInfoIsPublic() throws Exception {
@@ -125,6 +129,23 @@ class SecurityRulesTest {
     @Test
     void projectMemberEndpointsRequireAuthentication() throws Exception {
         mockMvc.perform(get("/api/v1/projects/1/members")).andExpect(status().isUnauthorized());
+    }
+
+    /**
+     * The monitor endpoints were never added to SecurityConfig — they are
+     * protected purely by anyRequest().authenticated(), which is the point of
+     * writing the rule that way.
+     */
+    @Test
+    void everyMonitorEndpointRequiresAuthentication() throws Exception {
+        mockMvc.perform(get("/api/v1/projects/1/monitors")).andExpect(status().isUnauthorized());
+        mockMvc.perform(post("/api/v1/projects/1/monitors")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{}"))
+                .andExpect(status().isUnauthorized());
+        mockMvc.perform(get("/api/v1/monitors/1")).andExpect(status().isUnauthorized());
+        mockMvc.perform(post("/api/v1/monitors/1/pause")).andExpect(status().isUnauthorized());
+        mockMvc.perform(post("/api/v1/monitors/1/resume")).andExpect(status().isUnauthorized());
     }
 
     /** Anything not explicitly permitted must be protected by default. */

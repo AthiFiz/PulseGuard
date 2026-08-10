@@ -24,6 +24,9 @@ public enum ApiErrorCode {
     PROJECT_MEMBER_ALREADY_EXISTS(HttpStatus.CONFLICT),
     PROJECT_REQUIRES_ADMIN(HttpStatus.CONFLICT),
 
+    MONITOR_NOT_FOUND(HttpStatus.NOT_FOUND),
+    MONITOR_VALIDATION_ERROR(HttpStatus.BAD_REQUEST),
+
     INTERNAL_ERROR(HttpStatus.INTERNAL_SERVER_ERROR);
 
     private final HttpStatus status;

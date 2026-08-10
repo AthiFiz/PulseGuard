@@ -10,15 +10,19 @@ recovers.
 
 ## Current Status
 
-**Stage 3 — Authentication and Project Management**
+**Stage 4 — Monitor Management**
 
-The Control API now has stateless JWT authentication and full project
-management: register, log in, create projects, and manage who belongs to them
-and with what role.
+The Control API now has stateless JWT authentication, project management, and
+**monitor configuration**: register, log in, create a project, and configure the
+API endpoints you want watched.
 
-Still **not implemented**: monitor CRUD, the monitoring engine, scheduling,
-incidents, Kafka, notifications, and the entire authentication frontend. The
-React application remains the Stage 1 connectivity page.
+> **PulseGuard does not check anything yet.** Task 04 stores and validates
+> monitor configuration only. No HTTP request is ever made to a monitored URL,
+> no check history is recorded, and no monitor will ever become `UP` or `DOWN`.
+> That arrives with the Monitor Worker in the next stage.
+
+Still **not implemented**: the monitoring engine, scheduling, incidents, Kafka,
+notifications, and the entire frontend beyond the Stage 1 connectivity page.
 
 Only the Control API talks to the database. The Monitor Worker deliberately has
 no persistence or security dependencies until the stage that needs them.
@@ -322,14 +326,86 @@ DELETE /api/v1/projects/{id}/members/{memberId}  remove      (PROJECT_ADMIN)
 Members are added by the email of an **already registered** user; an unknown
 address returns `404 USER_NOT_FOUND` rather than creating or inviting anyone.
 
+### Monitors
+
+A monitor is one HTTP endpoint you want watched, together with how it should be
+checked. Monitors live inside a project, and permission to touch them comes
+entirely from project membership.
+
+```text
+POST   /api/v1/projects/{projectId}/monitors   create      (PROJECT_ADMIN)
+GET    /api/v1/projects/{projectId}/monitors   list        (any member)
+
+GET    /api/v1/monitors/{monitorId}            read        (any member)
+PUT    /api/v1/monitors/{monitorId}            reconfigure (PROJECT_ADMIN)
+DELETE /api/v1/monitors/{monitorId}            delete      (PROJECT_ADMIN)
+
+POST   /api/v1/monitors/{monitorId}/pause      pause       (PROJECT_ADMIN)
+POST   /api/v1/monitors/{monitorId}/resume     resume      (PROJECT_ADMIN)
+```
+
+Create one with:
+
+```bash
+curl -X POST http://localhost:8080/api/v1/projects/1/monitors \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{
+        "name": "Payment API",
+        "description": "Production payment service health endpoint",
+        "url": "https://api.example.com/actuator/health",
+        "httpMethod": "GET",
+        "expectedStatusCode": 200,
+        "intervalSeconds": 60,
+        "timeoutSeconds": 5,
+        "failureThreshold": 3
+      }'
+```
+
+#### Configuration fields
+
+| Field | Meaning | Rules |
+| --- | --- | --- |
+| `name` | Label shown in the UI | required, 2–150 chars, trimmed |
+| `description` | Free text | optional, ≤ 1000 chars; blank becomes `null` |
+| `url` | Endpoint to check | required, ≤ 2048 chars, **`http`/`https` only** |
+| `httpMethod` | Request method | **`GET` only** in this MVP |
+| `expectedStatusCode` | The status that counts as healthy | 100–599 |
+| `intervalSeconds` | How often to check | 30–86400 |
+| `timeoutSeconds` | How long to wait for a reply | 1–30, **must be less than the interval** |
+| `failureThreshold` | Consecutive failures before an incident | 1–10 |
+
+Operational fields — `currentStatus`, `consecutiveFailures`, `lastCheckedAt`,
+`nextCheckAt` — are returned but never accepted. There is no request field for
+any of them, so a client cannot declare a monitor healthy or reschedule it.
+
+A monitor also cannot be moved between projects. Access derives from the
+project, so reassigning one would silently change who can see it.
+
+#### Statuses
+
+| Status | Meaning | Set by |
+| --- | --- | --- |
+| `UNKNOWN` | Never successfully checked | creation and resume |
+| `PAUSED` | Deliberately not scheduled | pause |
+| `UP` / `DOWN` | Observed health | **the future monitoring engine — never a client** |
+
+**Pause** sets `PAUSED`, clears `nextCheckAt` so the monitor leaves the
+schedule, and resets `consecutiveFailures`. It keeps `lastCheckedAt`, which
+records something that really happened. Pausing twice is harmless.
+
+**Resume** returns a paused monitor to `UNKNOWN` and schedules it immediately.
+It deliberately does *not* set `UP` — no check has run. Resuming a monitor that
+is already `UP`, `DOWN`, or `UNKNOWN` changes nothing, so an accidental call
+cannot discard a real observed state.
+
 ### Roles
 
 | Role            | Scope    | Can do                                              |
 | --------------- | -------- | --------------------------------------------------- |
 | `USER`          | platform | the default; access comes only from membership      |
 | `ADMIN`         | platform | read and manage every project, without membership   |
-| `PROJECT_ADMIN` | project  | update/delete the project, manage its members       |
-| `VIEWER`        | project  | read the project and its member list                |
+| `PROJECT_ADMIN` | project  | update/delete the project, manage members and monitors |
+| `VIEWER`        | project  | read the project, its members and its monitors      |
 
 A project must always keep at least one `PROJECT_ADMIN` — the last one can be
 neither demoted nor removed (`409 PROJECT_REQUIRES_ADMIN`). Non-members receive
@@ -378,7 +454,6 @@ http://localhost:8081/api/v1/system/info
 Later stages will introduce, roughly in this order:
 
 ```text
-Monitor Management
 Monitoring Worker
 Dashboard
 Incident Management
@@ -392,4 +467,4 @@ Kubernetes
 Observability
 ```
 
-The next stage is **Task 04 — Monitor Management**.
+The next stage is **Task 05 — Monitoring Worker / HTTP Health Check Engine**.
