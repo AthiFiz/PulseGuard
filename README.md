@@ -10,16 +10,15 @@ recovers.
 
 ## Current Status
 
-**Stage 5 — Monitoring Worker**
+**Stage 6 — Monitoring History, Statistics and Dashboard APIs**
 
-**PulseGuard now actually monitors things.** Configure a monitor through the
-Control API and the Monitor Worker will check it on schedule, record every
-result, and move the monitor between `UP` and `DOWN`.
+PulseGuard monitors endpoints and now **exposes what it found**: check history,
+per-monitor statistics with uptime and response times, and a project-level
+dashboard.
 
-Still **not implemented**: incidents, Kafka, notifications, the check-history
-and dashboard APIs, and the entire frontend beyond the Stage 1 connectivity
-page. A monitor going `DOWN` updates its status and nothing else — nobody is
-told.
+Still **not implemented**: incidents, Kafka, notifications, and the entire
+frontend beyond the Stage 1 connectivity page. A monitor going `DOWN` updates
+its status and appears in the dashboard — but nobody is told.
 
 Both applications now share the same MySQL database: the Control API owns the
 schema and the configuration, the worker executes the checks.
@@ -473,6 +472,119 @@ It deliberately does *not* set `UP` — no check has run. Resuming a monitor tha
 is already `UP`, `DOWN`, or `UNKNOWN` changes nothing, so an accidental call
 cannot discard a real observed state.
 
+### Monitoring history, statistics and dashboard
+
+Read-only views over what the worker has recorded. **Any project member,
+including a `VIEWER`, may read all of these** — a viewer cannot change a monitor,
+but can see everything it has done.
+
+```text
+GET /api/v1/monitors/{monitorId}/checks       paginated check history
+GET /api/v1/monitors/{monitorId}/statistics   uptime and response times
+GET /api/v1/projects/{projectId}/dashboard    project snapshot
+```
+
+#### Check history
+
+```bash
+curl "http://localhost:8080/api/v1/monitors/25/checks?page=0&size=50" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+Always paginated — `monitor_checks` grows by one row per check forever. Sorted
+**newest first**.
+
+| Parameter | Default | Notes |
+| --- | --- | --- |
+| `page` | `0` | Must not be negative |
+| `size` | `50` | Maximum `100`; a larger value is **rejected**, not clamped |
+| `from` | – | Inclusive ISO-8601 instant, e.g. `2026-08-01T00:00:00Z` |
+| `to` | – | Inclusive |
+| `outcome` | – | `SUCCESS` or `FAILURE`; omitted returns both |
+
+The response is a stable envelope rather than Spring's internal `Page`:
+
+```json
+{ "content": [ … ], "page": 0, "size": 50, "totalElements": 201,
+  "totalPages": 5, "first": true, "last": false }
+```
+
+A monitor with no checks returns `200` with an empty `content`, not a `404`.
+
+#### Statistics
+
+```bash
+curl "http://localhost:8080/api/v1/monitors/25/statistics" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+With no range this covers **all recorded history**. `from` and `to` narrow it.
+
+```json
+{
+  "monitorId": 25, "from": null, "to": null,
+  "totalChecks": 1440, "successfulChecks": 1435, "failedChecks": 5,
+  "uptimePercentage": 99.65,
+  "averageResponseTimeMs": 121.42,
+  "minimumResponseTimeMs": 82, "maximumResponseTimeMs": 645,
+  "lastCheckedAt": "2026-08-12T08:30:00Z", "currentStatus": "UP"
+}
+```
+
+Two behaviours worth knowing:
+
+- **`null` means "no data", not zero.** A monitor with no checks reports
+  `uptimePercentage: null` — it has not been down, its availability is simply
+  unknown. Same for the response-time figures when no check recorded a duration
+  (a run of DNS failures, say). Returning `0` would claim an outage that never
+  happened, or an implausibly fast service.
+- **Response times ignore checks that never got a response.** A DNS failure or a
+  blocked destination has no duration and is excluded from the average rather
+  than counted as `0ms`.
+
+`lastCheckedAt` is the newest check *within the requested range*, which is not
+necessarily the monitor's own last check.
+
+#### Project dashboard
+
+```bash
+curl "http://localhost:8080/api/v1/projects/10/dashboard" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+**Defaults to the last 24 hours** — deliberately unlike statistics, where no
+range means all history. A dashboard answers "how are things now", so an outage
+last March should not colour today's number. Pass `from` and `to` to override.
+
+```json
+{
+  "projectId": 10,
+  "generatedAt": "2026-08-12T08:30:00Z",
+  "window": { "from": "2026-08-11T08:30:00Z", "to": "2026-08-12T08:30:00Z" },
+  "monitors": { "total": 10, "up": 7, "down": 1, "unknown": 1, "paused": 1 },
+  "checks": { "total": 1430, "successful": 1400, "failed": 30,
+              "uptimePercentage": 97.90, "averageResponseTimeMs": 132.50 },
+  "recentFailures": [ … ]
+}
+```
+
+`monitors` is **current state and ignores the window** — changing the range does
+not change those counts. `checks` and `recentFailures` describe the window.
+
+Project uptime is aggregated **across individual checks**, never by averaging
+each monitor's percentage. With a monitor on 1000 successful checks and another
+on a single failure, the honest figure is 99.90%; averaging the two percentages
+would say 50%.
+
+`recentFailures` holds the 10 most recent failed checks in the window, newest
+first, taken from the checks themselves — a monitor that is healthy right now may
+still have failed twenty minutes ago.
+
+> **Uptime here is calculated from successful monitoring checks, not from
+> measured incident duration.** It is a descriptive figure, not an SLA
+> calculation. Duration-based availability needs incidents, which do not exist
+> yet.
+
 ### Roles
 
 | Role            | Scope    | Can do                                              |
@@ -480,7 +592,7 @@ cannot discard a real observed state.
 | `USER`          | platform | the default; access comes only from membership      |
 | `ADMIN`         | platform | read and manage every project, without membership   |
 | `PROJECT_ADMIN` | project  | update/delete the project, manage members and monitors |
-| `VIEWER`        | project  | read the project, its members and its monitors      |
+| `VIEWER`        | project  | read the project, its members, monitors and all monitoring data |
 
 A project must always keep at least one `PROJECT_ADMIN` — the last one can be
 neither demoted nor removed (`409 PROJECT_REQUIRES_ADMIN`). Non-members receive
@@ -529,7 +641,6 @@ http://localhost:8081/api/v1/system/info
 Later stages will introduce, roughly in this order:
 
 ```text
-Dashboard
 Incident Management
 Kafka
 Notifications
@@ -541,4 +652,4 @@ Kubernetes
 Observability
 ```
 
-The next stage is **Task 06 — Monitoring History, Statistics and Dashboard APIs**.
+The next stage is **Task 07 — Frontend MVP**.

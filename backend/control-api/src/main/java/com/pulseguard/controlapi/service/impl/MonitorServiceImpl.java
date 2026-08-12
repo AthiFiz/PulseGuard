@@ -6,9 +6,9 @@ import com.pulseguard.controlapi.dto.monitor.CreateMonitorRequest;
 import com.pulseguard.controlapi.dto.monitor.MonitorResponse;
 import com.pulseguard.controlapi.dto.monitor.UpdateMonitorRequest;
 import com.pulseguard.controlapi.enums.MonitorStatus;
-import com.pulseguard.controlapi.exception.ApiErrorCode;
 import com.pulseguard.controlapi.exception.ApiException;
 import com.pulseguard.controlapi.repository.MonitorRepository;
+import com.pulseguard.controlapi.service.MonitorAccessService;
 import com.pulseguard.controlapi.service.MonitorService;
 import com.pulseguard.controlapi.service.ProjectAccessService;
 import java.net.URI;
@@ -33,6 +33,7 @@ public class MonitorServiceImpl implements MonitorService {
 
     private final MonitorRepository monitorRepository;
     private final ProjectAccessService projectAccessService;
+    private final MonitorAccessService monitorAccessService;
     private final Clock clock;
 
     /**
@@ -88,7 +89,7 @@ public class MonitorServiceImpl implements MonitorService {
     @Override
     @Transactional(readOnly = true)
     public MonitorResponse getMonitor(Long monitorId) {
-        return MonitorResponse.from(requireReadableMonitor(monitorId));
+        return MonitorResponse.from(monitorAccessService.requireReadableMonitor(monitorId));
     }
 
     /**
@@ -102,7 +103,7 @@ public class MonitorServiceImpl implements MonitorService {
     @Override
     @Transactional
     public MonitorResponse updateMonitor(Long monitorId, UpdateMonitorRequest request) {
-        Monitor monitor = requireManageableMonitor(monitorId);
+        Monitor monitor = monitorAccessService.requireManageableMonitor(monitorId);
 
         validateUrl(request.url());
         validateTimeoutAgainstInterval(request.timeoutSeconds(), request.intervalSeconds());
@@ -135,7 +136,7 @@ public class MonitorServiceImpl implements MonitorService {
     @Override
     @Transactional
     public MonitorResponse pauseMonitor(Long monitorId) {
-        Monitor monitor = requireManageableMonitor(monitorId);
+        Monitor monitor = monitorAccessService.requireManageableMonitor(monitorId);
 
         if (monitor.getCurrentStatus() == MonitorStatus.PAUSED) {
             return MonitorResponse.from(monitor);
@@ -163,7 +164,7 @@ public class MonitorServiceImpl implements MonitorService {
     @Override
     @Transactional
     public MonitorResponse resumeMonitor(Long monitorId) {
-        Monitor monitor = requireManageableMonitor(monitorId);
+        Monitor monitor = monitorAccessService.requireManageableMonitor(monitorId);
 
         if (monitor.getCurrentStatus() != MonitorStatus.PAUSED) {
             return MonitorResponse.from(monitor);
@@ -187,51 +188,9 @@ public class MonitorServiceImpl implements MonitorService {
     @Override
     @Transactional
     public void deleteMonitor(Long monitorId) {
-        Monitor monitor = requireManageableMonitor(monitorId);
+        Monitor monitor = monitorAccessService.requireManageableMonitor(monitorId);
         monitorRepository.delete(monitor);
         log.info("Monitor deleted: monitorId={}", monitorId);
-    }
-
-    /**
-     * Resolves a monitor the caller is allowed to see.
-     *
-     * <p>A caller with no access to the owning project gets MONITOR_NOT_FOUND
-     * rather than a project error, so monitor ids cannot be walked to discover
-     * what exists in other people's projects.
-     */
-    private Monitor requireReadableMonitor(Long monitorId) {
-        Monitor monitor = monitorRepository.findById(monitorId).orElseThrow(ApiException::monitorNotFound);
-        requireProjectAccess(monitor, false);
-        return monitor;
-    }
-
-    /** As above, but the caller must also be able to manage the project. */
-    private Monitor requireManageableMonitor(Long monitorId) {
-        Monitor monitor = monitorRepository.findById(monitorId).orElseThrow(ApiException::monitorNotFound);
-        requireProjectAccess(monitor, true);
-        return monitor;
-    }
-
-    /**
-     * Defers entirely to the existing project rules, translating only the
-     * "project is invisible to you" case into a monitor-shaped 404. A VIEWER
-     * attempting a write still gets the plain ACCESS_DENIED, because they can
-     * already see that the monitor exists.
-     */
-    private void requireProjectAccess(Monitor monitor, boolean requiresManage) {
-        Long projectId = monitor.getProject().getId();
-        try {
-            if (requiresManage) {
-                projectAccessService.requireManageableProject(projectId);
-            } else {
-                projectAccessService.requireReadableProject(projectId);
-            }
-        } catch (ApiException ex) {
-            if (ex.getErrorCode() == ApiErrorCode.PROJECT_NOT_FOUND) {
-                throw ApiException.monitorNotFound();
-            }
-            throw ex;
-        }
     }
 
     /**

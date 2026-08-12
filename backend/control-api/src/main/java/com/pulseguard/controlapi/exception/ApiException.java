@@ -70,6 +70,11 @@ public class ApiException extends RuntimeException {
         return new ApiException(ApiErrorCode.MONITOR_VALIDATION_ERROR, message);
     }
 
+    /** A reporting query whose parameters do not make sense together. */
+    public static ApiException monitoringQueryInvalid(String message) {
+        return new ApiException(ApiErrorCode.MONITORING_QUERY_INVALID, message);
+    }
+
     public static ApiException projectRequiresAdmin() {
         return new ApiException(
                 ApiErrorCode.PROJECT_REQUIRES_ADMIN,

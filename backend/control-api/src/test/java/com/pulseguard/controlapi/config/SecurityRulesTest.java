@@ -12,7 +12,9 @@ import com.pulseguard.controlapi.enums.SystemRole;
 import com.pulseguard.controlapi.security.SecurityErrorResponder;
 import com.pulseguard.controlapi.security.SystemRoleJwtAuthenticationConverter;
 import com.pulseguard.controlapi.service.AuthService;
+import com.pulseguard.controlapi.service.DashboardService;
 import com.pulseguard.controlapi.service.MonitorService;
+import com.pulseguard.controlapi.service.MonitoringQueryService;
 import com.pulseguard.controlapi.service.ProjectMemberService;
 import com.pulseguard.controlapi.service.ProjectService;
 import java.time.Instant;
@@ -64,6 +66,12 @@ class SecurityRulesTest {
 
     @MockitoBean
     private MonitorService monitorService;
+
+    @MockitoBean
+    private MonitoringQueryService monitoringQueryService;
+
+    @MockitoBean
+    private DashboardService dashboardService;
 
     @Test
     void systemInfoIsPublic() throws Exception {
@@ -146,6 +154,14 @@ class SecurityRulesTest {
         mockMvc.perform(get("/api/v1/monitors/1")).andExpect(status().isUnauthorized());
         mockMvc.perform(post("/api/v1/monitors/1/pause")).andExpect(status().isUnauthorized());
         mockMvc.perform(post("/api/v1/monitors/1/resume")).andExpect(status().isUnauthorized());
+    }
+
+    /** The Task 06 reporting endpoints are protected by the same default rule. */
+    @Test
+    void everyMonitoringReadEndpointRequiresAuthentication() throws Exception {
+        mockMvc.perform(get("/api/v1/monitors/1/checks")).andExpect(status().isUnauthorized());
+        mockMvc.perform(get("/api/v1/monitors/1/statistics")).andExpect(status().isUnauthorized());
+        mockMvc.perform(get("/api/v1/projects/1/dashboard")).andExpect(status().isUnauthorized());
     }
 
     /** Anything not explicitly permitted must be protected by default. */

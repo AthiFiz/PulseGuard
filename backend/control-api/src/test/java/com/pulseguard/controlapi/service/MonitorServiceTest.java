@@ -18,6 +18,7 @@ import com.pulseguard.controlapi.enums.MonitorStatus;
 import com.pulseguard.controlapi.exception.ApiErrorCode;
 import com.pulseguard.controlapi.exception.ApiException;
 import com.pulseguard.controlapi.repository.MonitorRepository;
+import com.pulseguard.controlapi.service.MonitorAccessService;
 import com.pulseguard.controlapi.service.impl.MonitorServiceImpl;
 import java.time.Clock;
 import java.time.Instant;
@@ -51,12 +52,16 @@ class MonitorServiceTest {
     @Mock
     private ProjectAccessService projectAccessService;
 
+    @Mock
+    private MonitorAccessService monitorAccessService;
+
     private MonitorServiceImpl monitorService;
 
     @BeforeEach
     void setUp() {
         monitorService = new MonitorServiceImpl(
-                monitorRepository, projectAccessService, Clock.fixed(NOW, ZoneOffset.UTC));
+                monitorRepository, projectAccessService, monitorAccessService,
+                Clock.fixed(NOW, ZoneOffset.UTC));
     }
 
     // ---------------------------------------------------------------- create
@@ -218,15 +223,16 @@ class MonitorServiceTest {
 
     @Test
     void gettingAMonitorRequiresOnlyReadAccess() {
-        givenExistingMonitor(monitor(MonitorStatus.UNKNOWN));
-        when(projectAccessService.requireReadableProject(PROJECT_ID)).thenReturn(project());
+        when(monitorAccessService.requireReadableMonitor(MONITOR_ID))
+                .thenReturn(monitor(MonitorStatus.UNKNOWN));
 
         assertThat(monitorService.getMonitor(MONITOR_ID).id()).isEqualTo(MONITOR_ID);
     }
 
     @Test
     void aMissingMonitorIsNotFound() {
-        when(monitorRepository.findById(MONITOR_ID)).thenReturn(Optional.empty());
+        when(monitorAccessService.requireReadableMonitor(MONITOR_ID))
+                .thenThrow(ApiException.monitorNotFound());
 
         assertThatThrownBy(() -> monitorService.getMonitor(MONITOR_ID))
                 .isInstanceOf(ApiException.class)
@@ -240,9 +246,8 @@ class MonitorServiceTest {
      */
     @Test
     void aNonMemberCannotDiscoverThatAMonitorExists() {
-        givenExistingMonitor(monitor(MonitorStatus.UP));
-        when(projectAccessService.requireReadableProject(PROJECT_ID))
-                .thenThrow(ApiException.projectNotFound());
+        when(monitorAccessService.requireReadableMonitor(MONITOR_ID))
+                .thenThrow(ApiException.monitorNotFound());
 
         assertThatThrownBy(() -> monitorService.getMonitor(MONITOR_ID))
                 .isInstanceOf(ApiException.class)
@@ -253,8 +258,7 @@ class MonitorServiceTest {
     /** A VIEWER can already see the monitor, so a write is an honest 403. */
     @Test
     void aViewerAttemptingAWriteGetsAccessDenied() {
-        givenExistingMonitor(monitor(MonitorStatus.UNKNOWN));
-        when(projectAccessService.requireManageableProject(PROJECT_ID))
+        when(monitorAccessService.requireManageableMonitor(MONITOR_ID))
                 .thenThrow(ApiException.accessDenied());
 
         assertThatThrownBy(() -> monitorService.pauseMonitor(MONITOR_ID))
@@ -272,8 +276,7 @@ class MonitorServiceTest {
         existing.setLastCheckedAt(Instant.parse("2026-08-09T09:00:00Z"));
         existing.setNextCheckAt(Instant.parse("2026-08-09T09:01:00Z"));
 
-        givenExistingMonitor(existing);
-        givenManageableProject();
+        givenManageableMonitor(existing);
 
         monitorService.updateMonitor(MONITOR_ID, new UpdateMonitorRequest(
                 "Renamed", "New description", "https://api.example.com/v2/health",
@@ -296,8 +299,7 @@ class MonitorServiceTest {
     void updateKeepsTheMonitorInItsOriginalProject() {
         Monitor existing = monitor(MonitorStatus.UNKNOWN);
         Project original = existing.getProject();
-        givenExistingMonitor(existing);
-        givenManageableProject();
+        givenManageableMonitor(existing);
 
         monitorService.updateMonitor(MONITOR_ID, new UpdateMonitorRequest(
                 "Renamed", null, "https://example.com/health",
@@ -308,8 +310,7 @@ class MonitorServiceTest {
 
     @Test
     void updateAppliesTheSameValidationAsCreation() {
-        givenExistingMonitor(monitor(MonitorStatus.UNKNOWN));
-        givenManageableProject();
+        givenManageableMonitor(monitor(MonitorStatus.UNKNOWN));
 
         assertThatThrownBy(() -> monitorService.updateMonitor(MONITOR_ID, new UpdateMonitorRequest(
                         "Renamed", null, "ftp://example.com/health",
@@ -328,8 +329,7 @@ class MonitorServiceTest {
         existing.setLastCheckedAt(Instant.parse("2026-08-09T09:00:00Z"));
         existing.setNextCheckAt(Instant.parse("2026-08-09T09:01:00Z"));
 
-        givenExistingMonitor(existing);
-        givenManageableProject();
+        givenManageableMonitor(existing);
 
         monitorService.pauseMonitor(MONITOR_ID);
 
@@ -344,8 +344,7 @@ class MonitorServiceTest {
     void pausingAnAlreadyPausedMonitorIsSafe() {
         Monitor existing = monitor(MonitorStatus.PAUSED);
         existing.setNextCheckAt(null);
-        givenExistingMonitor(existing);
-        givenManageableProject();
+        givenManageableMonitor(existing);
 
         MonitorResponse response = monitorService.pauseMonitor(MONITOR_ID);
 
@@ -360,8 +359,7 @@ class MonitorServiceTest {
         existing.setNextCheckAt(null);
         existing.setLastCheckedAt(Instant.parse("2026-08-09T09:00:00Z"));
 
-        givenExistingMonitor(existing);
-        givenManageableProject();
+        givenManageableMonitor(existing);
 
         monitorService.resumeMonitor(MONITOR_ID);
 
@@ -384,8 +382,7 @@ class MonitorServiceTest {
         existing.setConsecutiveFailures(2);
         existing.setNextCheckAt(Instant.parse("2026-08-09T09:01:00Z"));
 
-        givenExistingMonitor(existing);
-        givenManageableProject();
+        givenManageableMonitor(existing);
 
         monitorService.resumeMonitor(MONITOR_ID);
 
@@ -399,8 +396,7 @@ class MonitorServiceTest {
     @Test
     void deleteRemovesTheMonitor() {
         Monitor existing = monitor(MonitorStatus.UNKNOWN);
-        givenExistingMonitor(existing);
-        givenManageableProject();
+        givenManageableMonitor(existing);
 
         monitorService.deleteMonitor(MONITOR_ID);
 
@@ -409,8 +405,7 @@ class MonitorServiceTest {
 
     @Test
     void deleteRequiresManagePermission() {
-        givenExistingMonitor(monitor(MonitorStatus.UNKNOWN));
-        when(projectAccessService.requireManageableProject(PROJECT_ID))
+        when(monitorAccessService.requireManageableMonitor(MONITOR_ID))
                 .thenThrow(ApiException.accessDenied());
 
         assertThatThrownBy(() -> monitorService.deleteMonitor(MONITOR_ID))
@@ -429,8 +424,8 @@ class MonitorServiceTest {
         when(monitorRepository.save(any(Monitor.class))).thenAnswer(call -> call.getArgument(0));
     }
 
-    private void givenExistingMonitor(Monitor monitor) {
-        when(monitorRepository.findById(MONITOR_ID)).thenReturn(Optional.of(monitor));
+    private void givenManageableMonitor(Monitor monitor) {
+        when(monitorAccessService.requireManageableMonitor(MONITOR_ID)).thenReturn(monitor);
     }
 
     private Monitor capturedMonitor() {
