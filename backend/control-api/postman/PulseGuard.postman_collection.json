@@ -3375,11 +3375,17 @@
               }
             }
           ]
-        },
+        }
+      ]
+    },
+    {
+      "name": "7c \u00b7 Monitoring & Dashboard",
+      "description": "Read-only reporting over the data the Monitor Worker records. Most figures will be empty unless the worker has actually run against these monitors \u2014 the assertions are written to pass either way.",
+      "item": [
         {
-          "name": "Delete monitor",
+          "name": "Monitor check history",
           "request": {
-            "method": "DELETE",
+            "method": "GET",
             "header": [
               {
                 "key": "Authorization",
@@ -3387,7 +3393,7 @@
               }
             ],
             "url": {
-              "raw": "{{baseUrl}}/api/v1/monitors/{{monitorId}}",
+              "raw": "{{baseUrl}}/api/v1/monitors/{{monitorId}}/checks",
               "host": [
                 "{{baseUrl}}"
               ],
@@ -3395,7 +3401,49 @@
                 "api",
                 "v1",
                 "monitors",
-                "{{monitorId}}"
+                "{{monitorId}}",
+                "checks"
+              ]
+            },
+            "description": "Paginated, newest first. Defaults to page 0, size 50."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", function () { pm.response.to.have.status(200); });",
+                  "pm.test(\"returns a page envelope, not a raw Spring Page\", function () { var d = pm.response.json(); pm.expect(d).to.have.all.keys(\"content\",\"page\",\"size\",\"totalElements\",\"totalPages\",\"first\",\"last\"); });",
+                  "pm.test(\"defaults to the first page of 50\", function () { var d = pm.response.json(); pm.expect(d.page).to.eql(0); pm.expect(d.size).to.eql(50); });",
+                  "pm.test(\"newest first\", function () { var c = pm.response.json().content; for (var i = 1; i < c.length; i++) { pm.expect(new Date(c[i-1].checkedAt).getTime()).to.be.at.least(new Date(c[i].checkedAt).getTime()); } });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Monitor check history \u00b7 failures only",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{viewerToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/monitors/{{monitorId}}/checks?outcome=FAILURE&size=10",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "monitors",
+                "{{monitorId}}",
+                "checks?outcome=FAILURE&size=10"
               ]
             }
           },
@@ -3406,14 +3454,16 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test(\"status is 204\", function () { pm.response.to.have.status(204); });"
+                  "pm.test(\"status is 200\", function () { pm.response.to.have.status(200); });",
+                  "pm.test(\"every row is a failure\", function () { pm.response.json().content.forEach(function (c) { pm.expect(c.outcome).to.eql(\"FAILURE\"); }); });",
+                  "pm.test(\"failures without a response carry a null status\", function () { pm.response.json().content.forEach(function (c) { if (c.errorType === \"DNS_ERROR\" || c.errorType === \"CONNECTION_ERROR\" || c.errorType === \"BLOCKED_ADDRESS\") { pm.expect(c.httpStatusCode).to.be.null; } }); });"
                 ]
               }
             }
           ]
         },
         {
-          "name": "The monitor is gone",
+          "name": "Monitor check history \u00b7 date range",
           "request": {
             "method": "GET",
             "header": [
@@ -3423,7 +3473,7 @@
               }
             ],
             "url": {
-              "raw": "{{baseUrl}}/api/v1/monitors/{{monitorId}}",
+              "raw": "{{baseUrl}}/api/v1/monitors/{{monitorId}}/checks?from=2020-01-01T00:00:00Z&to=2100-01-01T00:00:00Z&page=0&size=5",
               "host": [
                 "{{baseUrl}}"
               ],
@@ -3431,7 +3481,436 @@
                 "api",
                 "v1",
                 "monitors",
-                "{{monitorId}}"
+                "{{monitorId}}",
+                "checks?from=2020-01-01T00:00:00Z&to=2100-01-01T00:00:00Z&page=0&size=5"
+              ]
+            },
+            "description": "Both bounds are inclusive ISO-8601 instants."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", function () { pm.response.to.have.status(200); });",
+                  "pm.test(\"respects the requested page size\", function () { pm.expect(pm.response.json().size).to.eql(5); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Reject a page size above the maximum",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{viewerToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/monitors/{{monitorId}}/checks?size=500",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "monitors",
+                "{{monitorId}}",
+                "checks?size=500"
+              ]
+            },
+            "description": "Rejected rather than silently clamped, so a client is never left believing it received everything."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 400\", function () { pm.response.to.have.status(400); });",
+                  "pm.test(\"error code is MONITORING_QUERY_INVALID\", function () { pm.expect(pm.response.json().code).to.eql(\"MONITORING_QUERY_INVALID\"); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Reject a negative page",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{viewerToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/monitors/{{monitorId}}/checks?page=-1",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "monitors",
+                "{{monitorId}}",
+                "checks?page=-1"
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 400\", function () { pm.response.to.have.status(400); });",
+                  "pm.test(\"error code is MONITORING_QUERY_INVALID\", function () { pm.expect(pm.response.json().code).to.eql(\"MONITORING_QUERY_INVALID\"); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Reject an unknown outcome",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{viewerToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/monitors/{{monitorId}}/checks?outcome=MAYBE",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "monitors",
+                "{{monitorId}}",
+                "checks?outcome=MAYBE"
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 400\", function () { pm.response.to.have.status(400); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Reject an unparseable timestamp",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{viewerToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/monitors/{{monitorId}}/checks?from=yesterday",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "monitors",
+                "{{monitorId}}",
+                "checks?from=yesterday"
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 400\", function () { pm.response.to.have.status(400); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Monitor statistics",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{viewerToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/monitors/{{monitorId}}/statistics",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "monitors",
+                "{{monitorId}}",
+                "statistics"
+              ]
+            },
+            "description": "With no range this covers all recorded history \u2014 unlike the dashboard, which defaults to the last 24 hours."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", function () { pm.response.to.have.status(200); });",
+                  "pm.test(\"counts add up\", function () { var d = pm.response.json(); pm.expect(d.successfulChecks + d.failedChecks).to.eql(d.totalChecks); });",
+                  "pm.test(\"uptime is null with no checks, never zero\", function () { var d = pm.response.json(); if (d.totalChecks === 0) { pm.expect(d.uptimePercentage).to.be.null; } });",
+                  "pm.test(\"uptime matches the counts\", function () { var d = pm.response.json(); if (d.totalChecks > 0) { var expected = Math.round(d.successfulChecks / d.totalChecks * 10000) / 100; pm.expect(Math.abs(d.uptimePercentage - expected)).to.be.below(0.02); } });",
+                  "pm.test(\"min <= average <= max when timings exist\", function () { var d = pm.response.json(); if (d.averageResponseTimeMs !== null) { pm.expect(d.minimumResponseTimeMs).to.be.at.most(d.averageResponseTimeMs); pm.expect(d.maximumResponseTimeMs).to.be.at.least(d.averageResponseTimeMs); } });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Monitor statistics \u00b7 date range",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{viewerToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/monitors/{{monitorId}}/statistics?from=2020-01-01T00:00:00Z&to=2100-01-01T00:00:00Z",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "monitors",
+                "{{monitorId}}",
+                "statistics?from=2020-01-01T00:00:00Z&to=2100-01-01T00:00:00Z"
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", function () { pm.response.to.have.status(200); });",
+                  "pm.test(\"echoes the requested range\", function () { var d = pm.response.json(); pm.expect(d.from).to.not.be.null; pm.expect(d.to).to.not.be.null; });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Reject a range that ends before it starts",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{viewerToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/monitors/{{monitorId}}/statistics?from=2100-01-01T00:00:00Z&to=2020-01-01T00:00:00Z",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "monitors",
+                "{{monitorId}}",
+                "statistics?from=2100-01-01T00:00:00Z&to=2020-01-01T00:00:00Z"
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 400\", function () { pm.response.to.have.status(400); });",
+                  "pm.test(\"error code is MONITORING_QUERY_INVALID\", function () { pm.expect(pm.response.json().code).to.eql(\"MONITORING_QUERY_INVALID\"); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Statistics for an unknown monitor",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{viewerToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/monitors/999999/statistics",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "monitors",
+                "999999",
+                "statistics"
+              ]
+            },
+            "description": "Never an empty result \u2014 an unknown or inaccessible monitor is a 404."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 404\", function () { pm.response.to.have.status(404); });",
+                  "pm.test(\"error code is MONITOR_NOT_FOUND\", function () { pm.expect(pm.response.json().code).to.eql(\"MONITOR_NOT_FOUND\"); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Project dashboard",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{viewerToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/projects/{{projectId}}/dashboard",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "projects",
+                "{{projectId}}",
+                "dashboard"
+              ]
+            },
+            "description": "Defaults to the last 24 hours. Status counts are current state and ignore the window; check figures describe the window."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", function () { pm.response.to.have.status(200); });",
+                  "pm.test(\"status counts add up to the total\", function () { var m = pm.response.json().monitors; pm.expect(m.up + m.down + m.unknown + m.paused).to.eql(m.total); });",
+                  "pm.test(\"defaults to a 24 hour window\", function () { var w = pm.response.json().window; var hours = (new Date(w.to) - new Date(w.from)) / 3600000; pm.expect(Math.round(hours)).to.eql(24); });",
+                  "pm.test(\"check counts add up\", function () { var c = pm.response.json().checks; pm.expect(c.successful + c.failed).to.eql(c.total); });",
+                  "pm.test(\"at most ten recent failures\", function () { pm.expect(pm.response.json().recentFailures.length).to.be.at.most(10); });",
+                  "pm.test(\"no incident metrics \u2014 they do not exist yet\", function () { var d = pm.response.json(); pm.expect(d).to.not.have.property(\"activeIncidents\"); pm.expect(d).to.not.have.property(\"incidentCount\"); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Project dashboard \u00b7 custom window",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{viewerToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/projects/{{projectId}}/dashboard?from=2020-01-01T00:00:00Z&to=2100-01-01T00:00:00Z",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "projects",
+                "{{projectId}}",
+                "dashboard?from=2020-01-01T00:00:00Z&to=2100-01-01T00:00:00Z"
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", function () { pm.response.to.have.status(200); });",
+                  "pm.test(\"uses the window it was given\", function () { pm.expect(pm.response.json().window.from).to.include(\"2020-01-01\"); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Dashboard for an inaccessible project",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{viewerToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/projects/999999/dashboard",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "projects",
+                "999999",
+                "dashboard"
               ]
             }
           },
@@ -3443,7 +3922,7 @@
                 "type": "text/javascript",
                 "exec": [
                   "pm.test(\"status is 404\", function () { pm.response.to.have.status(404); });",
-                  "pm.test(\"error code is MONITOR_NOT_FOUND\", function () { pm.expect(pm.response.json().code).to.eql(\"MONITOR_NOT_FOUND\"); });"
+                  "pm.test(\"error code is PROJECT_NOT_FOUND\", function () { pm.expect(pm.response.json().code).to.eql(\"PROJECT_NOT_FOUND\"); });"
                 ]
               }
             }
@@ -3691,6 +4170,80 @@
       "name": "10 \u00b7 Clean up",
       "description": "Removes everything the run created.",
       "item": [
+        {
+          "name": "Delete the monitor",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{viewerToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/monitors/{{monitorId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "monitors",
+                "{{monitorId}}"
+              ]
+            },
+            "description": "Kept alive until now so the reporting folder had something to read."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 204\", function () { pm.response.to.have.status(204); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "The monitor is gone",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{viewerToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/monitors/{{monitorId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "monitors",
+                "{{monitorId}}"
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 404\", function () { pm.response.to.have.status(404); });",
+                  "pm.test(\"error code is MONITOR_NOT_FOUND\", function () { pm.expect(pm.response.json().code).to.eql(\"MONITOR_NOT_FOUND\"); });"
+                ]
+              }
+            }
+          ]
+        },
         {
           "name": "Delete the second project",
           "request": {

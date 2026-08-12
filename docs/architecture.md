@@ -1,7 +1,8 @@
 # PulseGuard Architecture
 
-This document describes the architecture as it stands at **Stage 5 — Monitoring
-Worker**, and the shape it is intended to grow into.
+This document describes the architecture as it stands at **Stage 6 — Monitoring
+History, Statistics and Dashboard APIs**, and the shape it is intended to grow
+into.
 
 Anything marked **[NOT YET IMPLEMENTED]** does not exist in the codebase.
 
@@ -55,11 +56,11 @@ Implemented today:
 - **stateless JWT authentication**: registration, login, and current user
 - **project management**: project CRUD plus membership and role management
 - **monitor configuration**: monitor CRUD, pause and resume
+- **monitoring reads**: check history, monitor statistics, project dashboard
 
 Future responsibilities **[NOT YET IMPLEMENTED]**:
 
 - incident APIs
-- dashboard and reporting queries
 
 ### Monitor Worker
 
@@ -123,7 +124,7 @@ are **[NOT YET IMPLEMENTED]** and belong to a much later stage.
 
 ---
 
-## Current Architecture (Stage 5)
+## Current Architecture (Stage 6)
 
 ```text
                      ┌──────────────────┐
@@ -136,6 +137,7 @@ are **[NOT YET IMPLEMENTED]** and belong to a much later stage.
         │            Control API  :8080            │
         │              CONFIGURATION PLANE         │
         │  Authentication · Projects · Monitors    │
+        │  Monitoring history · statistics · dashboard │
         │  Owns the Flyway migrations              │
         └──────────────────┬───────────────────────┘
                            │ JDBC
@@ -232,6 +234,91 @@ No incidents, no Kafka events, no notifications, and **no distributed locking**.
 Exactly one worker instance is assumed — two workers against the same database
 would both see the same due monitors and check everything twice. Coordination
 (`SELECT … FOR UPDATE SKIP LOCKED`) belongs to the Kubernetes scaling stage.
+
+---
+
+## Write path and read path
+
+Monitoring data has exactly one writer and one reader, and they are different
+applications:
+
+```text
+Monitored APIs
+      ▲
+      │ HTTP GET
+      │
+Monitor Worker                    WRITE PATH
+      │
+      │ inserts monitor_checks
+      │ updates monitors.current_status
+      ▼
+   MySQL
+      │
+      │ aggregate queries
+      ▼
+Control API                       READ PATH
+      │
+      ├── GET /monitors/{id}/checks       history
+      ├── GET /monitors/{id}/statistics   uptime, response times
+      └── GET /projects/{id}/dashboard    project snapshot
+      │
+      ▼
+Future Frontend                   [NOT YET IMPLEMENTED]
+```
+
+The separation is deliberate and worth stating plainly: **the worker never
+serves a request, and the Control API never performs a check.** Neither can slow
+the other down except through the database, and each can be scaled for its own
+workload — the API's load follows how many people are looking at it, the
+worker's follows how many monitors exist.
+
+### Reading without loading everything
+
+A single monitor on a 30-second interval produces about a million rows a year.
+Nothing in the read path ever loads a check collection into Java to reduce it:
+
+| Endpoint | How it reads |
+| --- | --- |
+| Check history | Paginated, capped at 100 rows, always `ORDER BY checked_at DESC` |
+| Monitor statistics | One `COUNT`/`SUM`/`AVG`/`MIN`/`MAX` aggregate in MySQL |
+| Dashboard | Exactly three queries, regardless of monitor count |
+
+The dashboard's three queries are a grouped status count, one project-wide check
+aggregate joined through `monitors.project_id`, and the recent failures. There is
+no loop issuing a query per monitor — a project with 500 monitors would otherwise
+cost 1500 round trips.
+
+All of it leans on the `(monitor_id, checked_at)` index created in Task 02, which
+serves both the history ordering and the range filters.
+
+### What the numbers mean
+
+**Uptime is check-based**: successful checks divided by total checks. It is not
+duration-based availability, which would need incidents to know how long an
+outage actually lasted. The README says so explicitly, because "99.65% uptime"
+invites being read as an SLA figure.
+
+**Project uptime aggregates checks, never averages percentages.** A monitor with
+1000 successful checks and one with a single failure is 99.90% by check count;
+averaging the two percentages gives 50%, which describes nothing real.
+
+**`null` is not zero.** No checks means unknown availability, not zero
+availability — so `uptimePercentage` is null rather than `0`. The same applies to
+response times when no check in range recorded a duration.
+
+**Monitor status counts are current state**, read from
+`monitors.current_status`, and do not move when the dashboard's time window
+changes. Only the check figures and recent failures describe the window.
+
+### Growth
+
+`monitor_checks` is append-only and grows without bound — one row per check,
+forever, for every monitor. Nothing prunes it.
+
+Future considerations, none implemented: retention limits, partitioning by time,
+pre-aggregated summary tables for long ranges, a time-series store, or archival
+to cold storage. Pagination and database-side aggregation keep the current
+queries honest, but they do not stop the table growing.
 
 ---
 
@@ -449,7 +536,8 @@ users             accounts; unique email
 projects          monitor groupings; created_by -> users
 project_members   user/project membership; unique (project_id, user_id)
 monitors          monitored endpoints, their configuration and current state
-monitor_checks    the result of each individual check [no writer yet]
+monitor_checks    the result of each individual check; written by the worker,
+                  read by the Control API's reporting endpoints
 ```
 
 All tables are InnoDB / utf8mb4, use `snake_case` naming, and use
@@ -467,7 +555,7 @@ Hibernate validation both run.
 
 ---
 
-## Technology Notes (Stage 5)
+## Technology Notes (Stage 6)
 
 | Area          | Choice                                                          |
 | ------------- | --------------------------------------------------------------- |
