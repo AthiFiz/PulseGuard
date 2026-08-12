@@ -10,22 +10,19 @@ recovers.
 
 ## Current Status
 
-**Stage 4 — Monitor Management**
+**Stage 5 — Monitoring Worker**
 
-The Control API now has stateless JWT authentication, project management, and
-**monitor configuration**: register, log in, create a project, and configure the
-API endpoints you want watched.
+**PulseGuard now actually monitors things.** Configure a monitor through the
+Control API and the Monitor Worker will check it on schedule, record every
+result, and move the monitor between `UP` and `DOWN`.
 
-> **PulseGuard does not check anything yet.** Task 04 stores and validates
-> monitor configuration only. No HTTP request is ever made to a monitored URL,
-> no check history is recorded, and no monitor will ever become `UP` or `DOWN`.
-> That arrives with the Monitor Worker in the next stage.
+Still **not implemented**: incidents, Kafka, notifications, the check-history
+and dashboard APIs, and the entire frontend beyond the Stage 1 connectivity
+page. A monitor going `DOWN` updates its status and nothing else — nobody is
+told.
 
-Still **not implemented**: the monitoring engine, scheduling, incidents, Kafka,
-notifications, and the entire frontend beyond the Stage 1 connectivity page.
-
-Only the Control API talks to the database. The Monitor Worker deliberately has
-no persistence or security dependencies until the stage that needs them.
+Both applications now share the same MySQL database: the Control API owns the
+schema and the configuration, the worker executes the checks.
 
 ---
 
@@ -53,17 +50,23 @@ no persistence or security dependencies until the stage that needs them.
                      └──────────────────┘
 
 
-                     ┌──────────────────┐
+                              ▲
+                              │ JDBC
+                     ┌────────┴─────────┐
                      │ Monitor Worker   │
                      │ localhost:8081   │
-                     │ [no database yet]│
+                     └────────┬─────────┘
+                              │ HTTP GET
+                              ▼
+                     ┌──────────────────┐
+                     │ Monitored APIs   │
                      └──────────────────┘
 ```
 
-The Monitor Worker is currently completely independent. It does not talk to the
-Control API or the database, it holds no monitoring logic, and nothing calls it
-except its own health endpoint. It exists now so that background monitoring work
-has a home in later stages.
+The two backends never talk to each other — they meet in the database. The
+Control API is the configuration plane: it owns the schema and decides what
+should be monitored. The Monitor Worker is the execution plane: it reads that
+configuration, performs the checks, and writes the results back.
 
 ---
 
@@ -172,12 +175,65 @@ default username or password.
 
 ## Running the Monitor Worker
 
+The worker now needs the **same database** as the Control API. It will not start
+without it — that is deliberate, since a worker that cannot reach MySQL cannot
+monitor anything.
+
 ```bash
+export DB_URL="jdbc:mysql://localhost:3306/pulseguard?connectionTimeZone=UTC&preserveInstants=true"
+export DB_USERNAME="YOUR_MYSQL_USERNAME"
+export DB_PASSWORD="YOUR_MYSQL_PASSWORD"
+
 cd backend/monitor-worker
 ./mvnw spring-boot:run
 ```
 
 Starts on <http://localhost:8081>.
+
+### What it does
+
+Every few seconds it looks for monitors whose `nextCheckAt` has passed, and for
+each one: validates the destination, sends a `GET`, measures the response time,
+compares the status against the monitor's `expectedStatusCode`, writes a row to
+`monitor_checks`, and updates the monitor's state.
+
+The polling interval is **not** a monitor's check interval. The worker wakes on
+its own cadence and checks only what is due, so a 5-second poll and a 60-second
+monitor produce one check per minute, not twelve.
+
+### Worker configuration
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `DB_URL` / `DB_USERNAME` / `DB_PASSWORD` | local `pulseguard` | Same database as the Control API |
+| `MONITOR_POLL_INTERVAL` | `PT5S` | How often to look for due monitors |
+| `MONITOR_BATCH_SIZE` | `50` | Most monitors processed in one cycle |
+| `MONITOR_ALLOW_PRIVATE_ADDRESSES` | `false` | Allow loopback/private destinations |
+
+### Monitoring something on your own machine
+
+By default the worker refuses destinations that resolve to loopback or private
+addresses, because it sends requests to URLs any user can supply. To point a
+monitor at something local — the Control API's own health endpoint, say — start
+the worker with:
+
+```bash
+MONITOR_ALLOW_PRIVATE_ADDRESSES=true ./mvnw spring-boot:run
+```
+
+Cloud metadata endpoints such as `169.254.169.254` stay blocked either way.
+
+### One worker only
+
+Running two worker instances against the same database will double-check every
+monitor. There is no locking yet — coordination arrives with the Kubernetes
+scaling stage.
+
+### No incidents
+
+A monitor reaching `DOWN` updates its status and writes check history. It does
+**not** open an incident, publish an event, or notify anyone. That is a later
+stage.
 
 ---
 
@@ -387,7 +443,26 @@ project, so reassigning one would silently change who can see it.
 | --- | --- | --- |
 | `UNKNOWN` | Never successfully checked | creation and resume |
 | `PAUSED` | Deliberately not scheduled | pause |
-| `UP` / `DOWN` | Observed health | **the future monitoring engine — never a client** |
+| `UP` / `DOWN` | Observed health | **the Monitor Worker — never a client** |
+
+```text
+UNKNOWN ──── successful check ────► UP
+                                     │
+                          consecutive failures
+                            reach the threshold
+                                     ▼
+                                   DOWN
+                                     │
+                            successful check
+                                     ▼
+                                    UP
+
+PAUSED ────── resume ──────► UNKNOWN
+```
+
+A failure below the threshold **keeps the current status**, so one blip does not
+flip a healthy monitor to `DOWN`. A success resets the failure count from any
+state. Reaching `DOWN` produces no incident and no notification.
 
 **Pause** sets `PAUSED`, clears `nextCheckAt` so the monitor leaves the
 schedule, and resets `consecutiveFailures`. It keeps `lastCheckedAt`, which
@@ -454,7 +529,6 @@ http://localhost:8081/api/v1/system/info
 Later stages will introduce, roughly in this order:
 
 ```text
-Monitoring Worker
 Dashboard
 Incident Management
 Kafka
@@ -467,4 +541,4 @@ Kubernetes
 Observability
 ```
 
-The next stage is **Task 05 — Monitoring Worker / HTTP Health Check Engine**.
+The next stage is **Task 06 — Monitoring History, Statistics and Dashboard APIs**.
