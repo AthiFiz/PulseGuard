@@ -6,5 +6,7 @@ public enum MonitorCheckErrorType {
     CONNECTION_ERROR,
     UNEXPECTED_STATUS,
     DNS_ERROR,
+    /** The Monitor Worker refused the destination under its SSRF policy. */
+    BLOCKED_ADDRESS,
     UNKNOWN
 }

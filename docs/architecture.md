@@ -1,7 +1,7 @@
 # PulseGuard Architecture
 
-This document describes the architecture as it stands at **Stage 4 — Monitor
-Management**, and the shape it is intended to grow into.
+This document describes the architecture as it stands at **Stage 5 — Monitoring
+Worker**, and the shape it is intended to grow into.
 
 Anything marked **[NOT YET IMPLEMENTED]** does not exist in the codebase.
 
@@ -68,23 +68,27 @@ independently deployable** from the Control API.
 
 Implemented today:
 
-- `GET /actuator/health`
-- `GET /api/v1/system/info`
+- `GET /actuator/health` and `GET /api/v1/system/info`
+- **finding monitors that are due** for a check
+- **executing HTTP GET checks** with a per-monitor timeout
+- **measuring response time**
+- **persisting every check** to `monitor_checks`
+- **updating monitor state**: consecutive failures, and UP/DOWN transitions
 
-It contains no monitoring logic whatsoever — no scheduling, no HTTP checking, no
-persistence. It has **no database dependencies at all**: no Spring Data JPA, no
-MySQL driver, no Flyway, no entities. Adding them now would duplicate the schema
-across two independent Maven projects for no benefit, so worker database access
-is deferred to the stage that actually needs it.
+It connects to the same MySQL database as the Control API but maps only
+`monitors` and `monitor_checks`, with `project_id` and `monitor_id` as plain
+`Long` columns rather than JPA associations — the worker performs no project
+authorization, so the whole project-management model would be dead weight.
+
+**It runs no migrations.** Flyway lives entirely in the Control API; the worker
+uses `ddl-auto=validate` and would fail to start if the schema did not match
+what it expects.
 
 Future responsibilities **[NOT YET IMPLEMENTED]**:
 
-- finding monitors that are due for a check
-- executing HTTP health checks and enforcing timeouts
-- measuring response time
-- persisting monitor check results
-- updating monitor state and tracking consecutive failures
-- detecting outages and recoveries
+- opening and resolving incidents
+- publishing events to Kafka
+- coordinating multiple worker replicas
 
 ---
 
@@ -119,118 +123,196 @@ are **[NOT YET IMPLEMENTED]** and belong to a much later stage.
 
 ---
 
-## Current Architecture (Stage 4)
+## Current Architecture (Stage 5)
 
 ```text
                      ┌──────────────────┐
                      │ React Frontend   │
                      │ localhost:5173   │
                      └────────┬─────────┘
-                              │
                               │ HTTP + Bearer JWT
                               ▼
-                     ┌──────────────────────────────┐
-                     │        Control API           │
-                     │        localhost:8080        │
-                     │                              │
-                     │  ├── Authentication / JWT    │
-                     │  ├── Project Management      │
-                     │  └── Monitor Configuration   │
-                     └──────────────┬───────────────┘
-                                    │
-                                    │ JDBC
-                                    ▼
-                     ┌──────────────────────────────┐
-                     │            MySQL             │
-                     │          pulseguard          │
-                     │  users / projects / members  │
-                     └──────────────────────────────┘
-
-
-                     ┌──────────────────────────────┐
-                     │       Monitor Worker         │
-                     │       localhost:8081         │
-                     │  [no database, no security]  │
-                     └──────────────────────────────┘
+        ┌──────────────────────────────────────────┐
+        │            Control API  :8080            │
+        │              CONFIGURATION PLANE         │
+        │  Authentication · Projects · Monitors    │
+        │  Owns the Flyway migrations              │
+        └──────────────────┬───────────────────────┘
+                           │ JDBC
+                           ▼
+                 ┌───────────────────┐
+                 │       MySQL       │
+                 │    pulseguard     │
+                 └─────────▲─────────┘
+                           │ JDBC
+        ┌──────────────────┴───────────────────────┐
+        │           Monitor Worker  :8081          │
+        │              EXECUTION PLANE             │
+        │  Polls for due monitors · runs checks    │
+        │  Runs no migrations                      │
+        └──────────────────┬───────────────────────┘
+                           │ HTTP GET
+                           ▼
+                 ┌───────────────────┐
+                 │  Monitored APIs   │
+                 └───────────────────┘
 ```
 
-The frontend does not yet authenticate — it still only calls the public
+The two backends never call each other. They meet in the database, which is what
+lets them scale independently later: the Control API's load follows how many
+people are using the UI, while the worker's follows how many monitors exist and
+how often they are checked.
+
+The frontend still does not authenticate — it only calls the public
 `/api/v1/system/info`. The login UI arrives in the frontend stage.
 
 ---
 
-## Monitors: configured, but not yet checked
-
-Stage 4 added everything needed to *describe* a monitor and nothing that acts on
-one. No HTTP request is made to a monitored URL, no `monitor_checks` row is
-written, and no monitor ever becomes `UP` or `DOWN`.
-
-### The handover point is `next_check_at`
-
-Creating or resuming a monitor sets `monitors.next_check_at` to the current UTC
-instant, which means "this monitor is eligible to be checked now". Pausing sets
-it to `NULL`, which means "do not schedule this at all".
-
-**Nothing reads that column yet.** It is written so the queue is already
-populated the moment a worker exists:
+## How a check happens
 
 ```text
-Configured Monitor
-       │
-       │  next_check_at  ← written by the Control API (Stage 4)
-       ▼
-Monitor Worker            [NOT YET IMPLEMENTED — Task 05]
-       │  claims monitors whose next_check_at has passed
-       ▼
-  HTTP Check              [NOT YET IMPLEMENTED]
-       │
-       ▼
-  MonitorCheck            [table exists, no writer]
-       │
-       ▼
-  UP / DOWN, incidents    [NOT YET IMPLEMENTED]
+MonitorPollingScheduler          every MONITOR_POLL_INTERVAL (default PT5S)
+        │
+        ▼
+MonitorPollingService            status <> PAUSED
+        │   due-monitor query      and next_check_at <= now
+        │                          order by next_check_at, limit batch size
+        ▼
+  MonitorSnapshot                detached copy — no transaction held open
+        │
+        ▼
+DestinationPolicy                resolve the host, apply the SSRF rules
+        │                        blocked  → BLOCKED_ADDRESS, no request sent
+        │                        no DNS   → DNS_ERROR
+        ▼
+HttpHealthChecker                GET, per-monitor timeout, no redirects,
+        │                        body never read, monotonic timing
+        ▼
+HealthCheckResult                outcome, status, duration, error type
+        │
+        ▼
+MonitorResultService             ONE short transaction:
+        │                          insert monitor_checks
+        ▼                          update monitors state + schedule
 ```
 
-### Why clients cannot set status
+**No database transaction is ever held open across the HTTP call.** The due
+query finishes and detaches its rows, the request happens with nothing open, and
+the result is written in its own short transaction afterwards. A monitored
+endpoint that takes 30 seconds to answer therefore cannot pin a database
+connection for 30 seconds.
 
-The API exposes `pause` and `resume` rather than a general "set status"
-endpoint. `UNKNOWN` and `PAUSED` are statements of intent, which a user is
-entitled to make; `UP` and `DOWN` are conclusions drawn from observation, which
-only the monitoring engine may assert. Resume therefore returns a monitor to
-`UNKNOWN`, never `UP`, and leaves an already-`UP`/`DOWN` monitor untouched so an
-accidental call cannot erase a real observation.
+Monitors are processed **sequentially**, and one failing monitor is caught and
+logged so the rest of the cycle continues. A failure of the polling query itself
+is swallowed at the scheduler so the next tick retries — an escaping exception
+would kill the scheduled task for the life of the process.
 
-Time comes from an injected `java.time.Clock` rather than `Instant.now()`, which
-keeps scheduling assertions deterministic in tests and gives the worker the same
-seam when it needs to reason about due times.
+### Timing semantics
 
-### Security consideration for Task 05: SSRF
+`checkedAt` is captured immediately **before** the request and is used for both
+the stored check and the monitor's `lastCheckedAt`. The next run is scheduled as
+`checkedAt + intervalSeconds`, not `now + intervalSeconds`, so the schedule does
+not drift by the duration of every request.
 
-Once the worker starts issuing requests to user-supplied URLs, PulseGuard
-becomes a **server-side request forgery** vector: anyone who can create a
-monitor can make the server issue HTTP requests on their behalf, from inside the
-network, and learn something from the outcome.
+The polling interval and a monitor's interval are different things. The scheduler
+wakes every 5 seconds and asks which monitors are due; a monitor with a 60-second
+interval is still checked once a minute.
 
-Stage 4 validates only that the URL is a syntactically valid `http`/`https` URI
-with a host. That is deliberate — the application makes no requests yet, and
-local addresses are genuinely useful while developing and demonstrating the
-project. **Task 05 must decide how to handle at least the following before the
-first outbound request is made:**
+### Races that are handled
 
-- `localhost` and `127.0.0.0/8`
-- private ranges: `10/8`, `172.16/12`, `192.168/16`
-- link-local `169.254/16`, and especially cloud metadata endpoints such as
-  `169.254.169.254`
-- IPv6 equivalents, including `::1` and unique-local addresses
-- **DNS rebinding** — a hostname that resolves to a public address at validation
-  time and a private one at request time, which means the check must happen at
-  connection time, not at save time
-- **redirects** — a permitted public URL that redirects into private space
-- response size and time limits, so a hostile endpoint cannot exhaust the worker
+| Race | Behaviour |
+| --- | --- |
+| Monitor paused mid-request | The check is stored, but the status stays `PAUSED` and `nextCheckAt` stays null — the pause is a deliberate instruction and wins |
+| Monitor deleted mid-request | The result is discarded; inserting the check would violate the foreign key |
+| Configuration changed mid-request | The result reflects the configuration at request time; the schedule is recalculated from the freshly re-read monitor |
 
-A reasonable design is an allow/deny policy that is permissive by default in
-local development and restrictive in deployed environments, enforced when the
-connection is opened rather than when the monitor is saved.
+### Not implemented at this stage
+
+No incidents, no Kafka events, no notifications, and **no distributed locking**.
+Exactly one worker instance is assumed — two workers against the same database
+would both see the same due monitors and check everything twice. Coordination
+(`SELECT … FOR UPDATE SKIP LOCKED`) belongs to the Kubernetes scaling stage.
+
+---
+
+## Monitor status: who may assert what
+
+`UNKNOWN` and `PAUSED` are statements of intent and can be set by a user, through
+creation, pause, and resume. `UP` and `DOWN` are conclusions drawn from
+observation and are written **only** by the Monitor Worker — the Control API
+exposes `pause` and `resume` rather than a general "set status" endpoint, so no
+client can declare a monitor healthy.
+
+That is also why resume returns a monitor to `UNKNOWN` rather than `UP`: at that
+moment no check has run, so its health is genuinely unknown.
+
+```text
+UNKNOWN ──── successful check ────► UP ◄──── successful check ──── DOWN
+   │                                 │                              ▲
+   │                        failures reach the                      │
+   └── failure below threshold       threshold ─────────────────────┘
+       keeps the current status
+```
+
+A failure below the threshold preserves the existing status, so a single blip
+does not flip a healthy monitor. A success resets the failure counter from any
+state. **Neither transition produces an incident or a notification yet.**
+
+---
+
+## SSRF protection
+
+The worker sends HTTP requests to URLs supplied by its users, which makes it a
+potential server-side request forgery tool: anyone who can create a monitor
+could otherwise point it at internal services they cannot reach themselves and
+learn something from the result.
+
+### What is implemented
+
+- **Resolution at execution time.** `DestinationPolicy` runs immediately before
+  every request, not when the monitor was saved — the answer can change.
+- **Judgement on resolved addresses, never on the host string.** Blocking the
+  literal text `localhost` would be defeated by `127.0.0.1`, `[::1]`,
+  `2130706433`, or any name pointed at a loopback address. **Every** address a
+  name resolves to is examined, so a host returning one public and one private
+  address is refused.
+- **Blocked by default:** loopback, wildcard, link-local, IPv4 private ranges
+  (10/8, 172.16/12, 192.168/16), IPv6 unique-local (fc00::/7), carrier-grade NAT
+  (100.64/10), and multicast.
+- **Always blocked**, even with the development override on: cloud metadata
+  endpoints — `169.254.169.254`, `fd00:ec2::254`, `100.100.100.200` — because
+  they hand out instance credentials to anything that can reach them.
+- **Redirects are not followed.** A permitted public URL that redirects into
+  private space would otherwise bypass the policy entirely, since only the first
+  hop is checked. A 3xx is simply reported as the status it is.
+- **Per-monitor timeouts** on both connect and read, so a hostile endpoint cannot
+  hold the worker open.
+- **The response body is never read**, so a large or slow body cannot exhaust
+  memory. Only the status code and elapsed time are used.
+- **Errors are bounded and generic.** Exception messages, which may echo parts of
+  the URL, are not stored; messages are truncated to the column length.
+
+### The development override
+
+`MONITOR_ALLOW_PRIVATE_ADDRESSES=true` relaxes the private-network rules so a
+developer can monitor something on their own machine. It is **false by default**,
+and cloud metadata and multicast stay blocked regardless.
+
+### Known limitations — this is not complete SSRF protection
+
+- **DNS rebinding is not fully prevented.** The policy resolves the host and then
+  the HTTP client resolves it again when it opens the socket. A name that answers
+  with a public address for the first lookup and a private one for the second
+  would slip through. Closing this properly means pinning the validated address
+  through to the socket, which is deliberately out of scope here.
+- Only the first hop is validated, which is safe only because redirects are
+  disabled.
+- There is no allow-list mode, no egress proxy, and no per-project destination
+  policy.
+- IPv4-mapped IPv6 forms and unusual literal encodings rely on the JDK's parsing
+  being canonical.
+
+These belong to the Testing and Hardening stage.
 
 ---
 
@@ -385,7 +467,7 @@ Hibernate validation both run.
 
 ---
 
-## Technology Notes (Stage 4)
+## Technology Notes (Stage 5)
 
 | Area          | Choice                                                          |
 | ------------- | --------------------------------------------------------------- |
