@@ -1,44 +1,62 @@
-import { useEffect, useState } from 'react'
-import { fetchSystemInfo } from './api/systemApi'
-import { ConnectionStatus, type ConnectionState } from './components/ConnectionStatus'
-import './App.css'
+import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
+import { AuthProvider } from './auth/AuthContext'
+import { ProtectedRoute, PublicOnlyRoute } from './auth/ProtectedRoute'
+import { AppLayout } from './components/layout/AppLayout'
+import { LoginPage } from './pages/LoginPage'
+import { MonitorDetailsPage } from './pages/MonitorDetailsPage'
+import { MonitorFormPage } from './pages/MonitorFormPage'
+import { NotFoundPage } from './pages/NotFoundPage'
+import { ProjectDashboardPage } from './pages/ProjectDashboardPage'
+import { ProjectLayout } from './pages/ProjectLayout'
+import { ProjectMembersPage } from './pages/ProjectMembersPage'
+import { ProjectMonitorsPage } from './pages/ProjectMonitorsPage'
+import { ProjectSettingsPage } from './pages/ProjectSettingsPage'
+import { ProjectsPage } from './pages/ProjectsPage'
+import { RegisterPage } from './pages/RegisterPage'
 
+/**
+ * A plain client-side SPA. Every route below `ProtectedRoute` requires a
+ * verified session; the two public routes bounce a signed-in user onward.
+ */
 export default function App() {
-  const [controlApiState, setControlApiState] = useState<ConnectionState>('CHECKING')
-
-  useEffect(() => {
-    let active = true
-
-    fetchSystemInfo()
-      .then(() => {
-        if (active) {
-          setControlApiState('AVAILABLE')
-        }
-      })
-      .catch(() => {
-        if (active) {
-          setControlApiState('UNAVAILABLE')
-        }
-      })
-
-    return () => {
-      active = false
-    }
-  }, [])
-
   return (
-    <main className="app">
-      <header className="app-header">
-        <h1>PulseGuard</h1>
-        <p className="tagline">API Monitoring &amp; Incident Management Platform</p>
-      </header>
+    <BrowserRouter>
+      <AuthProvider>
+        <Routes>
+          <Route element={<PublicOnlyRoute />}>
+            <Route path="/login" element={<LoginPage />} />
+            <Route path="/register" element={<RegisterPage />} />
+          </Route>
 
-      <section className="panel">
-        <h2>System Status</h2>
-        <ConnectionStatus label="Control API" state={controlApiState} />
-      </section>
+          <Route element={<ProtectedRoute />}>
+            <Route element={<AppLayout />}>
+              <Route path="/" element={<Navigate to="/projects" replace />} />
+              <Route path="/projects" element={<ProjectsPage />} />
 
-      <footer className="app-footer">Stage 1 — Project Foundation</footer>
-    </main>
+              {/* The project shell loads the project once and works out what
+                  the current user is allowed to do with it. */}
+              <Route path="/projects/:projectId" element={<ProjectLayout />}>
+                <Route index element={<Navigate to="dashboard" replace />} />
+                <Route path="dashboard" element={<ProjectDashboardPage />} />
+                <Route path="monitors" element={<ProjectMonitorsPage />} />
+                <Route path="members" element={<ProjectMembersPage />} />
+                <Route path="settings" element={<ProjectSettingsPage />} />
+              </Route>
+
+              {/* Creating needs the project in the path; everything else
+                  identifies the monitor by its own id. */}
+              <Route
+                path="/projects/:projectId/monitors/new"
+                element={<MonitorFormPage mode="create" />}
+              />
+              <Route path="/monitors/:monitorId" element={<MonitorDetailsPage />} />
+              <Route path="/monitors/:monitorId/edit" element={<MonitorFormPage mode="edit" />} />
+
+              <Route path="*" element={<NotFoundPage />} />
+            </Route>
+          </Route>
+        </Routes>
+      </AuthProvider>
+    </BrowserRouter>
   )
 }

@@ -1,8 +1,7 @@
 # PulseGuard Architecture
 
-This document describes the architecture as it stands at **Stage 6 — Monitoring
-History, Statistics and Dashboard APIs**, and the shape it is intended to grow
-into.
+This document describes the architecture as it stands at **Stage 7 — Frontend
+MVP**, and the shape it is intended to grow into.
 
 Anything marked **[NOT YET IMPLEMENTED]** does not exist in the codebase.
 
@@ -20,8 +19,8 @@ relevant users. When the API recovers, PulseGuard will detect the recovery, mark
 the monitor `UP`, resolve the active incident, and send a recovery
 notification.
 
-None of that behaviour exists yet. Stage 1 establishes only the runnable
-skeleton.
+Detection, `UP`/`DOWN` transitions and the reporting on top of them exist today,
+and are usable from the browser. Incidents, events and notifications do not.
 
 ---
 
@@ -29,18 +28,23 @@ skeleton.
 
 ### React Frontend
 
-The React application provides the entire user-facing interface.
+The React application provides the entire user-facing interface. It is a
+single-page application talking to exactly one backend, the Control API.
 
-Implemented today: an application shell that calls the Control API once on load
-and reports whether the backend is reachable.
+Implemented today:
+
+- **authentication**: register, sign in, sign out, and session restore
+- **projects**: list, create, rename, delete, and member management
+- **monitors**: create, reconfigure, pause, resume, delete
+- **monitoring views**: project dashboard, per-monitor statistics, and filtered,
+  paginated check history
+- **role-aware rendering**: a `VIEWER` is shown no action they cannot perform
 
 Future responsibilities **[NOT YET IMPLEMENTED]**:
 
-- login
-- project and monitor management screens
-- dashboard
-- response-time charts and monitoring history
+- response-time charts
 - incident list and incident detail views
+- live updates (every screen refreshes on navigation or an explicit *Refresh*)
 
 ### Control API
 
@@ -124,21 +128,27 @@ are **[NOT YET IMPLEMENTED]** and belong to a much later stage.
 
 ---
 
-## Current Architecture (Stage 6)
+## Current Architecture (Stage 7)
 
 ```text
-                     ┌──────────────────┐
-                     │ React Frontend   │
-                     │ localhost:5173   │
-                     └────────┬─────────┘
-                              │ HTTP + Bearer JWT
-                              ▼
+        ┌──────────────────────────────────────────┐
+        │          React Frontend  :5173           │
+        │            PRESENTATION PLANE            │
+        │  Login · Projects · Members · Monitors   │
+        │  Dashboard · Statistics · Check history  │
+        │  Token in sessionStorage · no rules      │
+        └──────────────────┬───────────────────────┘
+                           │ HTTP + Bearer JWT
+                           │ (CORS: FRONTEND_ORIGIN)
+                           ▼
         ┌──────────────────────────────────────────┐
         │            Control API  :8080            │
         │              CONFIGURATION PLANE         │
         │  Authentication · Projects · Monitors    │
         │  Monitoring history · statistics · dashboard │
         │  Owns the Flyway migrations              │
+        │  Authorises every request — the only     │
+        │  enforcement point in the system         │
         └──────────────────┬───────────────────────┘
                            │ JDBC
                            ▼
@@ -165,8 +175,9 @@ lets them scale independently later: the Control API's load follows how many
 people are using the UI, while the worker's follows how many monitors exist and
 how often they are checked.
 
-The frontend still does not authenticate — it only calls the public
-`/api/v1/system/info`. The login UI arrives in the frontend stage.
+The frontend never touches MySQL and never talks to the worker. It sees the
+system only through the Control API, so it is a rendering of that API's answers
+and nothing more — every figure on a dashboard is one the backend computed.
 
 ---
 
@@ -502,6 +513,44 @@ authentication later would require re-enabling CSRF.
 CORS keeps the configurable origin list from Stage 1 (`FRONTEND_ORIGIN`) and is
 applied through Spring Security. The wildcard origin is never used.
 
+### Where the browser keeps the token — and what that costs
+
+The frontend stores the access token in `sessionStorage`. That is a deliberate
+choice with a real limitation, so it is worth stating plainly.
+
+**What it buys.** The token never leaves the tab that obtained it, is gone when
+the tab closes, and is never attached automatically by the browser — which is
+exactly what makes disabling CSRF safe. A cookie would be sent on every
+cross-site request whether the application wanted it or not.
+
+**What it costs.** `sessionStorage` is readable by any JavaScript running on the
+page. Script injected into the frontend could read the token and use it until it
+expires. An `HttpOnly` cookie would be immune to that, at the price of needing
+CSRF protection and a same-site story.
+
+The mitigations that exist today are modest and honest about their scope: React
+escapes rendered content by default, the application never uses
+`dangerouslySetInnerHTML`, tokens live for one hour, and the token carries only
+platform identity — never project roles — so a stolen token still cannot claim a
+role its holder was never granted. There is no refresh token, so a stolen token
+cannot be renewed either.
+
+A production deployment would revisit this: short-lived tokens in memory with a
+refresh cookie, or an `HttpOnly` cookie with CSRF tokens. Both need endpoints
+that do not exist yet.
+
+### Authorisation is not in the frontend
+
+The UI hides what a `VIEWER` cannot do, and refuses management URLs typed
+directly. **None of that is a security control.** It is a courtesy — anything
+shipped to a browser can be edited in a browser.
+
+Every request is authorised again by the Control API through
+`ProjectAccessService`, and that is the only decision that counts. This was
+verified rather than assumed: a `VIEWER` who reached the monitor edit form before
+the guard was added could fill it in, and the save came back
+`403 You do not have permission to perform this action`.
+
 ---
 
 ## Database
@@ -555,18 +604,59 @@ Hibernate validation both run.
 
 ---
 
-## Technology Notes (Stage 6)
+## Known limitations of the frontend
 
-| Area          | Choice                                                          |
-| ------------- | --------------------------------------------------------------- |
-| Language      | Java 21                                                          |
-| Backend       | Spring Boot 4.1.0 (Web MVC, Actuator, Bean Validation)           |
-| Persistence   | Spring Data JPA / Hibernate, MySQL Connector/J, Flyway (control-api only) |
-| Security      | Spring Security + OAuth2 resource server, HS256 JWT (control-api only) |
-| Boilerplate   | Lombok, for getters/setters on entities                          |
-| Build         | Maven, via the Maven Wrapper in each project                     |
-| Frontend      | React 19, TypeScript, Vite 6                                     |
-| Frontend HTTP | the browser `fetch` API — no HTTP client library                 |
+Stated here so they are not mistaken for oversights.
+
+- **No live updates.** Screens load when you navigate to them and reload when you
+  press *Refresh*. A monitor that goes down while you are looking at the page
+  turns red on the next load, not the moment it happens. Polling or a push
+  channel is a later concern.
+- **No charts.** Response times are shown as numbers — average, fastest, slowest.
+  Drawing a series would mean a charting dependency and an endpoint that returns
+  time buckets; neither exists yet.
+- **Check history is paginated, not searchable.** You can filter by outcome and
+  date range because the API supports exactly that, and nothing more.
+- **Statistics cover all recorded history.** The per-monitor range parameters
+  exist in the API but the UI does not yet expose them; only the project
+  dashboard's fixed 24-hour window is shown.
+- **No incidents anywhere.** Nothing in the UI mentions incidents, because the
+  backend has none.
+- **Members are added by exact email.** There is no user search — the API offers
+  none, and adding one would let anybody enumerate registered accounts.
+- **Token in `sessionStorage`.** Discussed under *Security* above; it is a
+  known trade-off, not an accident.
+- **The router carries two moderate advisories.** `react-router` 6.30.4 is
+  reported by `npm audit` for an open-redirect via a backslash in a `<Link>`
+  target, and for `deserializeErrors()` during SSR hydration. The second does not
+  apply — this application does no server-side rendering. The first is only
+  reachable through a link target this application never builds: every route is a
+  literal string, and no user input becomes a path. The only fix offered is
+  React Router 7, which this stage deliberately does not adopt.
+
+---
+
+## Technology Notes (Stage 7)
+
+| Area           | Choice                                                          |
+| -------------- | --------------------------------------------------------------- |
+| Language       | Java 21                                                          |
+| Backend        | Spring Boot 4.1.0 (Web MVC, Actuator, Bean Validation)           |
+| Persistence    | Spring Data JPA / Hibernate, MySQL Connector/J, Flyway (control-api only) |
+| Security       | Spring Security + OAuth2 resource server, HS256 JWT (control-api only) |
+| Boilerplate    | Lombok, for getters/setters on entities                          |
+| Build          | Maven, via the Maven Wrapper in each project                     |
+| Frontend       | React 19, TypeScript, Vite 6                                     |
+| Routing        | react-router-dom 6                                               |
+| Frontend state | React Context and component state — no Redux                     |
+| Styling        | one hand-written stylesheet — no CSS framework                   |
+| Frontend HTTP  | the browser `fetch` API — no HTTP client library                 |
+| Frontend tests | Vitest + React Testing Library, jsdom                            |
+
+The frontend deliberately carries no state-management, styling, charting or HTTP
+library. At this size each would add a dependency and a set of conventions
+without removing work: there is no cross-screen shared state beyond the signed-in
+user, and every screen's data belongs to that screen.
 
 The two backend projects are independent Maven projects rather than modules of a
 shared parent, so each can be opened and built on its own in an IDE.
