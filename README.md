@@ -10,18 +10,18 @@ recovers.
 
 ## Current Status
 
-**Stage 6 — Monitoring History, Statistics and Dashboard APIs**
+**Stage 7 — Frontend MVP**
 
-PulseGuard monitors endpoints and now **exposes what it found**: check history,
-per-monitor statistics with uptime and response times, and a project-level
-dashboard.
+Everything the API can do is now **usable from a browser**: register and sign in,
+create projects, invite members, configure monitors, and watch their status,
+statistics and check history update as the worker runs.
 
-Still **not implemented**: incidents, Kafka, notifications, and the entire
-frontend beyond the Stage 1 connectivity page. A monitor going `DOWN` updates
-its status and appears in the dashboard — but nobody is told.
+Still **not implemented**: incidents, Kafka, notifications. A monitor going
+`DOWN` turns red in the UI — but nobody is told.
 
-Both applications now share the same MySQL database: the Control API owns the
-schema and the configuration, the worker executes the checks.
+All three applications share one MySQL database: the Control API owns the schema
+and the configuration, the worker executes the checks, and the frontend talks
+only to the Control API.
 
 ---
 
@@ -250,6 +250,85 @@ Starts on <http://localhost:5173>.
 The frontend reads the Control API location from `VITE_API_BASE_URL`. If no
 `.env` file is present it falls back to `http://localhost:8080`. Do not commit
 your own `.env` — only `.env.example` is tracked.
+
+The origin above must also be allowed by the Control API's CORS configuration
+(`FRONTEND_ORIGIN`, which already defaults to it). Changing the Vite port means
+changing both.
+
+### Running all three together
+
+Each process runs in its own terminal, in this order:
+
+```bash
+# 1. Control API — owns the schema, so it migrates the database first
+cd backend/control-api && ./mvnw spring-boot:run
+
+# 2. Monitor Worker — MONITOR_ALLOW_PRIVATE_ADDRESSES is only needed
+#    if you want to monitor something on your own machine
+cd backend/monitor-worker && MONITOR_ALLOW_PRIVATE_ADDRESSES=true ./mvnw spring-boot:run
+
+# 3. Frontend
+cd frontend && npm run dev
+```
+
+The frontend works without the worker — monitors simply stay `UNKNOWN`, because
+nothing is checking them.
+
+---
+
+## The Frontend
+
+A single-page React application. Every screen is a view over the Control API;
+the frontend holds no rules of its own and computes nothing the API already
+reports.
+
+```text
+/login  /register          public; a signed-in visitor is sent to /projects
+/projects                  the projects you belong to, and project creation
+/projects/:id/dashboard    monitor counts, 24-hour check figures, recent failures
+/projects/:id/monitors     every monitor with its current status
+/projects/:id/members      members and their roles
+/projects/:id/settings     rename or delete the project        (PROJECT_ADMIN)
+/projects/:id/monitors/new create a monitor                    (PROJECT_ADMIN)
+/monitors/:id              status, configuration, statistics, check history
+/monitors/:id/edit         reconfigure a monitor               (PROJECT_ADMIN)
+```
+
+### Sessions
+
+Signing in stores the access token in `sessionStorage`, so it lasts for the tab
+and disappears when the tab closes. On every load the application calls
+`GET /api/v1/auth/me` before rendering anything behind the guard: a stored token
+is a claim, and the API is what verifies it. That is why a browser refresh on a
+deep URL restores the session instead of bouncing to the login page.
+
+Any authenticated request rejected with `401` clears the token and returns the
+visitor to `/login`. A failed *login* is a `401` too and is deliberately excluded
+— it shows "Invalid email or password" on the form instead.
+
+Registering does not sign you in; it returns you to the login page with a
+confirmation. There is no refresh token, so an expired session means signing in
+again.
+
+### Roles in the UI
+
+A `VIEWER` sees a **Read only** badge, and the actions they cannot perform are
+not rendered: no *New monitor*, no *Edit*, *Pause* or *Delete*, no member
+management, and no Settings tab. Typing a management URL directly reaches a
+refusal rather than a form.
+
+This is presentation, not enforcement. Every one of those calls is authorised
+again by the Control API, which is the only thing standing between a request and
+the database.
+
+### Testing the frontend
+
+```bash
+cd frontend
+npm test          # watch mode
+npx vitest run    # single run
+npm run typecheck
+```
 
 ---
 
@@ -652,4 +731,4 @@ Kubernetes
 Observability
 ```
 
-The next stage is **Task 07 — Frontend MVP**.
+The next stage is **Task 08 — Incident Management**.
