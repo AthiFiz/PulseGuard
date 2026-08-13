@@ -1,7 +1,7 @@
 # PulseGuard Architecture
 
-This document describes the architecture as it stands at **Stage 9 — Kafka
-Event Streaming**, and the shape it is intended to grow into.
+This document describes the architecture as it stands at **Stage 10 —
+Notification Service**, and the shape it is intended to grow into.
 
 Anything marked **[NOT YET IMPLEMENTED]** does not exist in the codebase.
 
@@ -107,6 +107,20 @@ announced by whichever component observed it.
 Future responsibilities **[NOT YET IMPLEMENTED]**:
 
 - coordinating multiple worker replicas
+
+---
+
+## Three planes
+
+| Application | Plane | Owns |
+| --- | --- | --- |
+| **Control API** | configuration and query | the schema, authentication, projects, monitor configuration, and every read the UI makes |
+| **Monitor Worker** | monitoring and event production | executing checks, incident lifecycle, and publishing events through the outbox |
+| **Notification Service** | event consumption and delivery | consuming events idempotently, resolving recipients, and sending email |
+
+Each one can be stopped without stopping the others, and each degrades into a
+smaller but still-correct system: no worker means no new checks; no notification
+service means events wait on the topic; no SMTP means email queues.
 
 ---
 
@@ -659,6 +673,105 @@ These belong to the Testing and Hardening stage.
                                       │ [NOT YET ADDED]    │
                                       └────────────────────┘
 ```
+---
+
+## Consuming events: the inbox pattern
+
+The producer side (Task 09) guarantees **at-least-once** publication. The
+consumer side has to be built for that, not around it.
+
+```text
+                    Kafka incident event
+                             │
+                             ▼
+                    is this eventId known?
+                    ┌────────┴────────┐
+                   no                yes
+                    │                 │
+                    ▼                 ▼
+        ┌───────────────────────┐   do nothing
+        │ one MySQL transaction │   return successfully
+        │  insert consumed_event│   (the offset still commits)
+        │  insert deliveries    │
+        └───────────┬───────────┘
+                    ▼
+                  commit
+```
+
+This is the inbox pattern — the mirror of the outbox on the producing side.
+Where the outbox makes "the event will be sent" atomic with the state change,
+the inbox makes "the event will be acted on once" durable across restarts.
+
+Two guards, at different levels:
+
+| Guard | Catches |
+| --- | --- |
+| `existsByEventId` before writing | The ordinary redelivery, cheaply |
+| `UNIQUE(event_id)` in the database | The race the read-before-write cannot: two consumers, or a retry mid-transaction |
+| `UNIQUE(event_id, recipient_email, channel)` | A bug that processed one event twice queueing one person two identical emails |
+
+**Kafka's offset is deliberately not the identity.** A redelivered event arrives
+at a different offset; identity belongs to the event, not to its position in a
+log. The offset is stored for tracing and nothing else — verified by replaying a
+real message, consumed at offset 4 and ignored at offset 5.
+
+### Why the listener does not send email
+
+```text
+Kafka consumption  →  DB commit  →  ... later ...  →  email
+```
+
+If the listener sent the mail itself, an unreachable SMTP host would throw, the
+offset would never commit, and Kafka would redeliver the same incident until the
+mail server recovered — a delivery problem escalated into an event-processing
+problem, with a growing consumer lag to show for it.
+
+By committing first and sending later, an SMTP outage is contained: the event is
+dealt with, the delivery is queued, and only the last hop is waiting. This is why
+`NotificationEventProcessor` has no `JavaMailSender` — enforced by a test, so it
+stays that way.
+
+### Delivery, and what SMTP can and cannot promise
+
+```text
+PENDING ──── mail server accepts ────► SENT
+   │
+   │ attempt fails
+   ▼
+PENDING (attempt_count + 1, retry after the configured delay)
+   │
+   │ attempts exhausted
+   ▼
+FAILED  ← kept for inspection, never retried automatically
+```
+
+Deliveries are independent, so unlike the outbox publisher this loop does **not**
+stop at the first failure: there is no ordering between recipients, and one bad
+address must not delay everyone else. No transaction is held across the SMTP
+conversation.
+
+Two guarantees, deliberately not conflated:
+
+| | Guarantee |
+| --- | --- |
+| Kafka ingestion | **idempotent** — one `eventId`, processed once |
+| Email delivery | **at-least-once / best effort** |
+
+The email window cannot be closed:
+
+```text
+the mail server accepts the message
+        ↓
+the service crashes before SENT is committed
+        ↓
+the delivery is still PENDING and is retried
+        ↓
+the recipient may receive it twice
+```
+
+Sending an email is an external side effect with no rollback. No amount of
+database work makes it exactly-once, and PulseGuard does not claim otherwise.
+
 
 ---
 
@@ -862,6 +975,30 @@ Stated here so they are not mistaken for oversights.
 
 ---
 
+## Known limitations of notifications
+
+- **No preferences.** Every enabled member of a project is emailed about every
+  incident in it. There is no per-user setting, no digest and no quiet hours.
+- **Email may duplicate.** The crash window above is unavoidable; the ingestion
+  side is idempotent, the sending side is best-effort.
+- **Finite attempts, and no manual retry.** A delivery that exhausts its
+  attempts is left `FAILED` for inspection. There is no API to retry it — a
+  deliberate omission rather than a missing feature.
+- **A poison record can block a partition.** The consumer retries indefinitely
+  rather than discarding events, so a permanently unreadable payload would stall
+  its partition. There is no dead-letter topic yet; adding one — with
+  `ErrorHandlingDeserializer` and a `DeadLetterPublishingRecoverer` — is the
+  natural Task 11 hardening step.
+- **Email only.** No Slack, SMS, webhooks or push, and no HTML.
+- **The schema is shared.** The Notification Service reads `users` and
+  `project_members` directly over JDBC rather than calling the Control API. That
+  keeps the dependency narrow and read-only, but it is a shared database between
+  services, with the coupling that implies.
+- **No automated infrastructure tests.** The whole service is covered by unit
+  tests with mocks; Kafka, MySQL and SMTP behaviour was verified by hand.
+
+---
+
 ## Known limitations of event streaming
 
 - **At-least-once delivery.** A consumer may see an event twice; `eventId` is
@@ -914,7 +1051,7 @@ Stated here so they are not mistaken for oversights.
 
 ---
 
-## Technology Notes (Stage 9)
+## Technology Notes (Stage 10)
 
 | Area           | Choice                                                          |
 | -------------- | --------------------------------------------------------------- |
@@ -933,6 +1070,8 @@ Stated here so they are not mistaken for oversights.
 | Incidents      | worker-written rows; Control API reads only                      |
 | Events         | Spring Kafka 4.1 (`spring-boot-starter-kafka`), worker only      |
 | Event delivery | transactional outbox → scheduled publisher → Kafka               |
+| Notifications  | Kafka consumer → inbox → scheduled sender → SMTP                 |
+| Email          | Spring `JavaMailSender`, plain text, any SMTP server             |
 
 The frontend deliberately carries no state-management, styling, charting or HTTP
 library. At this size each would add a dependency and a set of conventions
