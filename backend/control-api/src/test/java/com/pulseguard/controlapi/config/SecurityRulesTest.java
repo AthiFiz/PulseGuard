@@ -13,6 +13,7 @@ import com.pulseguard.controlapi.security.SecurityErrorResponder;
 import com.pulseguard.controlapi.security.SystemRoleJwtAuthenticationConverter;
 import com.pulseguard.controlapi.service.AuthService;
 import com.pulseguard.controlapi.service.DashboardService;
+import com.pulseguard.controlapi.service.IncidentService;
 import com.pulseguard.controlapi.service.MonitorService;
 import com.pulseguard.controlapi.service.MonitoringQueryService;
 import com.pulseguard.controlapi.service.ProjectMemberService;
@@ -72,6 +73,9 @@ class SecurityRulesTest {
 
     @MockitoBean
     private DashboardService dashboardService;
+
+    @MockitoBean
+    private IncidentService incidentService;
 
     @Test
     void systemInfoIsPublic() throws Exception {
@@ -162,6 +166,13 @@ class SecurityRulesTest {
         mockMvc.perform(get("/api/v1/monitors/1/checks")).andExpect(status().isUnauthorized());
         mockMvc.perform(get("/api/v1/monitors/1/statistics")).andExpect(status().isUnauthorized());
         mockMvc.perform(get("/api/v1/projects/1/dashboard")).andExpect(status().isUnauthorized());
+    }
+
+    /** Incidents are read-only, and reading them still needs a token. */
+    @Test
+    void everyIncidentEndpointRequiresAuthentication() throws Exception {
+        mockMvc.perform(get("/api/v1/projects/1/incidents")).andExpect(status().isUnauthorized());
+        mockMvc.perform(get("/api/v1/incidents/1")).andExpect(status().isUnauthorized());
     }
 
     /** Anything not explicitly permitted must be protected by default. */

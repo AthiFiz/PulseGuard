@@ -2,11 +2,13 @@ import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
 import { AuthProvider } from './auth/AuthContext'
 import { ProtectedRoute, PublicOnlyRoute } from './auth/ProtectedRoute'
 import { AppLayout } from './components/layout/AppLayout'
+import { IncidentDetailsPage } from './pages/IncidentDetailsPage'
 import { LoginPage } from './pages/LoginPage'
 import { MonitorDetailsPage } from './pages/MonitorDetailsPage'
 import { MonitorFormPage } from './pages/MonitorFormPage'
 import { NotFoundPage } from './pages/NotFoundPage'
 import { ProjectDashboardPage } from './pages/ProjectDashboardPage'
+import { ProjectIncidentsPage } from './pages/ProjectIncidentsPage'
 import { ProjectLayout } from './pages/ProjectLayout'
 import { ProjectMembersPage } from './pages/ProjectMembersPage'
 import { ProjectMonitorsPage } from './pages/ProjectMonitorsPage'
@@ -39,6 +41,7 @@ export default function App() {
                 <Route index element={<Navigate to="dashboard" replace />} />
                 <Route path="dashboard" element={<ProjectDashboardPage />} />
                 <Route path="monitors" element={<ProjectMonitorsPage />} />
+                <Route path="incidents" element={<ProjectIncidentsPage />} />
                 <Route path="members" element={<ProjectMembersPage />} />
                 <Route path="settings" element={<ProjectSettingsPage />} />
               </Route>
@@ -51,6 +54,11 @@ export default function App() {
               />
               <Route path="/monitors/:monitorId" element={<MonitorDetailsPage />} />
               <Route path="/monitors/:monitorId/edit" element={<MonitorFormPage mode="edit" />} />
+
+              {/* An incident is addressed by its own id: it belongs to a
+                  monitor, which belongs to a project, and the API resolves
+                  that chain rather than trusting a project id in the path. */}
+              <Route path="/incidents/:incidentId" element={<IncidentDetailsPage />} />
 
               <Route path="*" element={<NotFoundPage />} />
             </Route>

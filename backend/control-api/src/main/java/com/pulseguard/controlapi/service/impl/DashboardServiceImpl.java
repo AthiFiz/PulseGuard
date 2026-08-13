@@ -9,8 +9,10 @@ import com.pulseguard.controlapi.dto.monitoring.ProjectCheckStatisticsResponse;
 import com.pulseguard.controlapi.dto.monitoring.ProjectDashboardResponse;
 import com.pulseguard.controlapi.dto.monitoring.RecentFailureResponse;
 import com.pulseguard.controlapi.dto.monitoring.TimeWindowResponse;
+import com.pulseguard.controlapi.enums.IncidentStatus;
 import com.pulseguard.controlapi.enums.MonitorCheckOutcome;
 import com.pulseguard.controlapi.enums.MonitorStatus;
+import com.pulseguard.controlapi.repository.IncidentRepository;
 import com.pulseguard.controlapi.repository.MonitorCheckRepository;
 import com.pulseguard.controlapi.repository.MonitorRepository;
 import com.pulseguard.controlapi.repository.projection.MonitorStatusCountProjection;
@@ -37,6 +39,7 @@ public class DashboardServiceImpl implements DashboardService {
 
     private final MonitorRepository monitorRepository;
     private final MonitorCheckRepository monitorCheckRepository;
+    private final IncidentRepository incidentRepository;
     private final ProjectAccessService projectAccessService;
     private final Clock clock;
 
@@ -44,10 +47,11 @@ public class DashboardServiceImpl implements DashboardService {
      * A project's operational snapshot: what state its monitors are in right
      * now, and how they behaved over a window.
      *
-     * <p>Three queries regardless of how many monitors the project has — a
-     * grouped status count, one project-wide aggregate, and the recent
-     * failures. Nothing loops over monitors issuing a query each, because a
-     * project with 500 monitors would then cost 1500 round trips.
+     * <p>Four queries regardless of how many monitors the project has — a
+     * grouped status count, an open-incident count, one project-wide aggregate,
+     * and the recent failures. Nothing loops over monitors issuing a query
+     * each, because a project with 500 monitors would then cost 2000 round
+     * trips.
      */
     @Override
     @Transactional(readOnly = true)
@@ -61,8 +65,21 @@ public class DashboardServiceImpl implements DashboardService {
                 Instant.now(clock),
                 new TimeWindowResponse(window.from(), window.to()),
                 currentStatusCounts(projectId),
+                openIncidentCount(projectId),
                 checkStatistics(projectId, window),
                 recentFailures(projectId, window));
+    }
+
+    /**
+     * Outages that are still open, deliberately outside the time window.
+     *
+     * <p>An incident that began three days ago and has not been resolved is an
+     * outage happening right now; hiding it because the dashboard is showing
+     * the last hour of checks would be actively misleading. This is current
+     * state, like the status counts above it.
+     */
+    private long openIncidentCount(Long projectId) {
+        return incidentRepository.countByProjectAndStatus(projectId, IncidentStatus.OPEN);
     }
 
     /**

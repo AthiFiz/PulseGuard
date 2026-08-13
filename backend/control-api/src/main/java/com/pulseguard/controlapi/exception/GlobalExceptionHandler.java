@@ -12,6 +12,7 @@ import org.springframework.web.ErrorResponseException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
 
@@ -96,9 +97,31 @@ public class GlobalExceptionHandler {
     }
 
     /**
-     * Spring's other web exceptions already carry the right status — an
-     * unsupported method, an unreadable media type. Passed through rather than
-     * swallowed by the catch-all below.
+     * The right URL with the wrong verb — POSTing to a read-only endpoint, say.
+     *
+     * <p>Needs its own handler for the same reason as the one above:
+     * {@code HttpRequestMethodNotSupportedException} implements
+     * {@code ErrorResponse} but does not extend {@code ErrorResponseException},
+     * so without this it reaches the catch-all and a plain client mistake is
+     * reported as a server fault.
+     */
+    @ExceptionHandler(HttpRequestMethodNotSupportedException.class)
+    public ResponseEntity<ApiErrorResponse> handleMethodNotSupported(
+            HttpRequestMethodNotSupportedException ex, HttpServletRequest request) {
+        return ResponseEntity.status(HttpStatus.METHOD_NOT_ALLOWED)
+                .body(new ApiErrorResponse(
+                        Instant.now(),
+                        HttpStatus.METHOD_NOT_ALLOWED.value(),
+                        "METHOD_NOT_ALLOWED",
+                        "This endpoint does not support %s".formatted(ex.getMethod()),
+                        request.getRequestURI(),
+                        List.of()));
+    }
+
+    /**
+     * Spring's remaining web exceptions already carry the right status, such as
+     * an unreadable media type. Passed through rather than swallowed by the
+     * catch-all below.
      */
     @ExceptionHandler(ErrorResponseException.class)
     public ResponseEntity<ApiErrorResponse> handleSpringWebError(

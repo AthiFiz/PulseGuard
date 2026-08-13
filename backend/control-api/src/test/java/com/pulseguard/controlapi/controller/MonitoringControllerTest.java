@@ -193,6 +193,9 @@ class MonitoringControllerTest {
                 .andExpect(jsonPath("$.projectId").value(10))
                 .andExpect(jsonPath("$.monitors.total").value(10))
                 .andExpect(jsonPath("$.monitors.up").value(7))
+                // Current state, alongside the status counts rather than inside
+                // the windowed check figures.
+                .andExpect(jsonPath("$.openIncidents").value(1))
                 .andExpect(jsonPath("$.checks.uptimePercentage").value(97.90))
                 .andExpect(jsonPath("$.recentFailures[0].monitorName").value("Payment API"))
                 .andExpect(jsonPath("$.window.from").exists());
@@ -254,6 +257,7 @@ class MonitoringControllerTest {
                 NOW,
                 new TimeWindowResponse(NOW.minusSeconds(86400), NOW),
                 new MonitorStatusCountsResponse(10, 7, 1, 1, 1),
+                1,
                 new ProjectCheckStatisticsResponse(
                         1430, 1400, 30, new BigDecimal("97.90"), new BigDecimal("132.50")),
                 List.of(new RecentFailureResponse(

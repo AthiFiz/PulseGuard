@@ -28,6 +28,8 @@ public enum ApiErrorCode {
     MONITOR_VALIDATION_ERROR(HttpStatus.BAD_REQUEST),
     MONITORING_QUERY_INVALID(HttpStatus.BAD_REQUEST),
 
+    INCIDENT_NOT_FOUND(HttpStatus.NOT_FOUND),
+
     INTERNAL_ERROR(HttpStatus.INTERNAL_SERVER_ERROR);
 
     private final HttpStatus status;
