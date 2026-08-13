@@ -2,6 +2,7 @@ import { useState, type FormEvent } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { ApiError } from '../api/apiClient'
 import { useAuth } from '../auth/AuthContext'
+import { safeRedirectPath } from '../auth/safeRedirect'
 
 interface LocationState {
   from?: { pathname: string }
@@ -26,8 +27,10 @@ export function LoginPage() {
 
     try {
       await login({ email, password })
-      // Back to wherever the guard interrupted, or the project list.
-      navigate(state?.from?.pathname ?? '/projects', { replace: true })
+      // Back to wherever the guard interrupted, or the project list. The
+      // remembered path came from the address bar, so it is checked before
+      // being navigated to — see safeRedirectPath.
+      navigate(safeRedirectPath(state?.from?.pathname), { replace: true })
     } catch (caught) {
       // The backend answers identically for an unknown email, a wrong password
       // and a disabled account, and this shows exactly what it said — nothing

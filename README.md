@@ -369,14 +369,26 @@ cd backend/monitor-worker
 ./mvnw clean verify
 ```
 
-**No database is required to build or test.** The test suite is deliberately
-limited to fast tests that need no external infrastructure — there is no
-database integration-test scope in this project.
+```bash
+cd backend/notification-service
+./mvnw clean verify
+```
 
-The consequence is that the schema is not covered by automated tests. Flyway
-migrations and Hibernate schema validation are exercised by **starting the
-Control API** against MySQL: if a migration is broken or an entity mapping
-disagrees with the schema, startup fails.
+**No database, broker, or mail server is required to build or test.** The suite
+is deliberately limited to fast tests that need no external infrastructure:
+there is no Testcontainers, no H2, no embedded Kafka, and no integration-test
+scope in this project.
+
+The consequence is that the schema, the SQL, and the Kafka round trip are not
+covered by automated tests. They are checked by hand instead, and
+`spring.jpa.hibernate.ddl-auto=validate` means **starting any service** doubles
+as a schema check: if a migration is broken or an entity mapping disagrees with
+the schema, startup fails loudly.
+
+What is and is not covered — and the manual checks that fill the gap — is
+recorded in **[docs/testing-hardening.md](docs/testing-hardening.md)**, along
+with the security findings, the reliability failure model, and development
+performance observations.
 
 ---
 

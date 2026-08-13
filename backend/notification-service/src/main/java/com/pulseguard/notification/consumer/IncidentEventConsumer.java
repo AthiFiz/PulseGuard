@@ -5,6 +5,7 @@ import com.pulseguard.notification.event.IncidentLifecycleEvent;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Component;
 
@@ -46,6 +47,44 @@ public class IncidentEventConsumer {
                 record.partition(),
                 record.offset());
 
-        notificationEventProcessor.process(event, record);
+        processOnceEvenIfAnotherConsumerIsRacing(event, record);
+    }
+
+    /**
+     * Handles the one duplicate the inbox check cannot catch.
+     *
+     * <p>{@code process} reads {@code consumed_event} and then writes to it. Two
+     * consumers holding the same event — a rebalance replaying an uncommitted
+     * offset, or a second instance starting mid-flight — can both read "not
+     * present" before either has committed. One then loses at commit, on the
+     * unique constraint that exists precisely for this.
+     *
+     * <p>Losing that race means the work was done, so it is not an error. But
+     * the same exception type also covers real integrity faults — a column too
+     * short for a subject line, say — and swallowing those would drop
+     * notifications silently. So the event is looked up again: if the row is
+     * genuinely there, this was a duplicate; if it is not, the failure was
+     * something else and is rethrown for the container to retry.
+     *
+     * <p>The catch has to sit out here. Inside {@code process} the transaction
+     * is already doomed, and with JPA the constraint may not even surface until
+     * commit — which happens after that method returns.
+     */
+    private void processOnceEvenIfAnotherConsumerIsRacing(
+            IncidentLifecycleEvent event, ConsumerRecord<String, String> record) {
+        try {
+            notificationEventProcessor.process(event, record);
+        } catch (DataIntegrityViolationException ex) {
+            if (!notificationEventProcessor.isAlreadyProcessed(event.eventId())) {
+                throw ex;
+            }
+            log.info(
+                    "Another consumer recorded this event first, ignoring duplicate: "
+                            + "eventId={}, eventType={}, partition={}, offset={}",
+                    event.eventId(),
+                    event.eventType(),
+                    record.partition(),
+                    record.offset());
+        }
     }
 }

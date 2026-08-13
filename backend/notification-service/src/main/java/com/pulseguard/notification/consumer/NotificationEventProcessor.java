@@ -40,11 +40,25 @@ public class NotificationEventProcessor {
     private final IncidentEmailComposer incidentEmailComposer;
     private final Clock clock;
 
+    /**
+     * Whether this event has already been dealt with.
+     *
+     * <p>Its own transaction, so it can be asked <em>after</em>
+     * {@link #process} has rolled back — which is the one moment the answer is
+     * interesting. See {@code IncidentEventConsumer} for why.
+     */
+    @Transactional(readOnly = true)
+    public boolean isAlreadyProcessed(String eventId) {
+        return consumedEventRepository.existsByEventId(eventId);
+    }
+
     @Transactional
     public void process(IncidentLifecycleEvent event, ConsumerRecord<String, String> record) {
         // Kafka delivers at-least-once, so a repeat is expected rather than
         // exceptional. The unique constraint on event_id is the real guarantee;
-        // this check just makes the common case a cheap read.
+        // this check just makes the common case a cheap read. Two consumers
+        // racing on the same event both pass it, and one of them then loses at
+        // commit — handled a level up, outside this transaction.
         if (consumedEventRepository.existsByEventId(event.eventId())) {
             log.info(
                     "Event already processed, ignoring redelivery: eventId={}, eventType={}, offset={}",
