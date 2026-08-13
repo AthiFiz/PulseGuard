@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "eventId": "0ff79604-749f-4cbb-b832-cd5d36b85712",
+  "eventType": "INCIDENT_RESOLVED",
+  "occurredAt": "2026-08-13T06:42:00Z",
+  "incidentId": 41,
+  "projectId": 10,
+  "monitorId": 25,
+  "monitorName": "Payment API",
+  "incidentOpenedAt": "2026-08-13T06:30:00Z",
+  "incidentResolvedAt": "2026-08-13T06:42:00Z",
+  "triggeringCheckId": 1525,
+  "monitorStatus": "UP",
+  "httpStatusCode": 200,
+  "responseTimeMs": 93,
+  "errorType": null,
+  "errorMessage": null
+}

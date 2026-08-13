@@ -2,6 +2,7 @@ package com.pulseguard.controlapi.config;
 
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -26,8 +27,10 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
 import org.springframework.context.annotation.Import;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.security.core.userdetails.UserDetailsService;
+import org.springframework.security.oauth2.jwt.BadJwtException;
 import org.springframework.security.oauth2.jwt.JwtDecoder;
 import org.springframework.test.context.TestPropertySource;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
@@ -179,6 +182,60 @@ class SecurityRulesTest {
     @Test
     void unknownApiPathsAreProtectedRatherThanOpen() throws Exception {
         mockMvc.perform(get("/api/v1/some/future/endpoint")).andExpect(status().isUnauthorized());
+    }
+
+    /**
+     * Every test above omits the header entirely. A token that is <em>present
+     * and bad</em> takes a different route through the filter chain — the
+     * decoder throws rather than the entry point firing on an anonymous
+     * request — and must still land on the same JSON 401 rather than a 500 with
+     * a stack trace.
+     *
+     * <p>The reasons a real token is rejected (expiry, a foreign issuer, a
+     * different signing key) are covered in {@code TokenServiceTest} against the
+     * genuine decoder; what matters here is that the failure is presented well.
+     */
+    @Test
+    void aRejectedTokenIsAnsweredWithJsonRatherThanAServerError() throws Exception {
+        Mockito.when(jwtDecoder.decode(ArgumentMatchers.anyString()))
+                .thenThrow(new BadJwtException("Signed JWT rejected: Invalid signature"));
+
+        mockMvc.perform(get("/api/v1/projects").header(HttpHeaders.AUTHORIZATION, "Bearer not.a.real.token"))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.status").value(401))
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON));
+    }
+
+    /** The rejection message names the signing failure; the client must not see it. */
+    @Test
+    void aRejectedTokenNeverExplainsWhyItWasRejected() throws Exception {
+        Mockito.when(jwtDecoder.decode(ArgumentMatchers.anyString()))
+                .thenThrow(new BadJwtException("Signed JWT rejected: Invalid signature"));
+
+        String body = mockMvc.perform(
+                        get("/api/v1/projects").header(HttpHeaders.AUTHORIZATION, "Bearer not.a.real.token"))
+                .andExpect(status().isUnauthorized())
+                .andReturn()
+                .getResponse()
+                .getContentAsString();
+
+        org.assertj.core.api.Assertions.assertThat(body)
+                .doesNotContain("signature")
+                .doesNotContain("Signed JWT")
+                .doesNotContain("Exception");
+    }
+
+    /**
+     * An unsupported scheme is not a token at all. It must be treated as no
+     * credentials rather than as a malformed one, and never parsed.
+     */
+    @Test
+    void aNonBearerAuthorizationHeaderIsTreatedAsNoCredentials() throws Exception {
+        mockMvc.perform(get("/api/v1/projects").header(HttpHeaders.AUTHORIZATION, "Basic dXNlcjpwYXNz"))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.code").value("AUTHENTICATION_REQUIRED"));
+
+        Mockito.verify(jwtDecoder, Mockito.never()).decode(ArgumentMatchers.anyString());
     }
 
     @Test

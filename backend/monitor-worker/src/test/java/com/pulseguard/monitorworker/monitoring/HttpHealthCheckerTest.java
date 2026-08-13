@@ -162,7 +162,8 @@ class HttpHealthCheckerTest {
 
     private static HttpHealthChecker checker(boolean allowPrivateAddresses) {
         DestinationPolicy policy = new DestinationPolicy(
-                new MonitoringProperties(Duration.ofSeconds(5), 50, allowPrivateAddresses));
+                new MonitoringProperties(Duration.ofSeconds(5), 50, allowPrivateAddresses),
+                java.net.InetAddress::getAllByName);
         return new HttpHealthChecker(policy, Clock.fixed(NOW, ZoneOffset.UTC));
     }
 

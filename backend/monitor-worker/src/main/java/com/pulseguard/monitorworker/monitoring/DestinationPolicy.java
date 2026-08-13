@@ -7,8 +7,10 @@ import java.net.InetAddress;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.UnknownHostException;
+import java.util.Arrays;
 import java.util.Locale;
 import java.util.Set;
+import java.util.stream.Collectors;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -43,13 +45,35 @@ public class DestinationPolicy {
      * <p>The cloud metadata endpoint hands out instance credentials to anything
      * that can reach it, so it stays blocked even when private addresses are
      * enabled for local development.
+     *
+     * <p>The literals are parsed and re-rendered through {@code InetAddress} so
+     * both sides of the comparison are written the same way. Comparing the raw
+     * text does not work for IPv6: {@code fd00:ec2::254} is reported by Java as
+     * {@code fd00:ec2:0:0:0:0:0:254}, and a set of literals would never match
+     * it.
      */
-    private static final Set<String> ALWAYS_BLOCKED = Set.of(
+    private static final Set<String> ALWAYS_BLOCKED = normalise(
             "169.254.169.254",  // AWS, Azure, DigitalOcean, OpenStack
             "fd00:ec2::254",    // AWS IPv6 metadata
             "100.100.100.200"); // Alibaba Cloud
 
+    private static Set<String> normalise(String... addresses) {
+        return Arrays.stream(addresses)
+                .map(address -> {
+                    try {
+                        return InetAddress.getByName(address).getHostAddress();
+                    } catch (UnknownHostException ex) {
+                        // These are IP literals, so resolution cannot fail
+                        // unless one is malformed — which is a programming
+                        // error worth failing loudly at startup.
+                        throw new IllegalStateException("Invalid blocked address: " + address, ex);
+                    }
+                })
+                .collect(Collectors.toUnmodifiableSet());
+    }
+
     private final MonitoringProperties monitoringProperties;
+    private final HostResolver hostResolver;
 
     /**
      * @return whether the URL may be requested, and if not, a message safe to
@@ -78,7 +102,7 @@ public class DestinationPolicy {
             // Every address the name resolves to is examined. A host that
             // returns one public and one private address must not be allowed
             // through on the strength of the public one.
-            addresses = InetAddress.getAllByName(host);
+            addresses = hostResolver.resolve(host);
         } catch (UnknownHostException ex) {
             return DestinationDecision.unresolvable("DNS resolution failed");
         }

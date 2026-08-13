@@ -630,9 +630,20 @@ and cloud metadata and multicast stay blocked regardless.
 - There is no allow-list mode, no egress proxy, and no per-project destination
   policy.
 - IPv4-mapped IPv6 forms and unusual literal encodings rely on the JDK's parsing
-  being canonical.
+  being canonical. This is now pinned down by tests rather than assumed:
+  `::ffff:127.0.0.1` normalises to an `Inet4Address` and is blocked; `2130706433`
+  and `127.1` both resolve to loopback and are blocked; `0177.0.0.1` is *not*
+  read as octal by Java and resolves to the public 177.0.0.1, which is documented
+  rather than treated as a bypass.
 
-These belong to the Testing and Hardening stage.
+One defect in this area was found and fixed during the hardening stage: the
+cloud-metadata blocklist compared address text, and Java expands
+`fd00:ec2::254` to `fd00:ec2:0:0:0:0:0:254`, so **AWS's IPv6 metadata endpoint
+was not blocked** when the development override was enabled. Literals are now
+normalised through `InetAddress` before comparison. See
+[docs/testing-hardening.md](testing-hardening.md).
+
+The remaining limitations above belong to a later stage.
 
 ---
 
@@ -859,6 +870,22 @@ cannot be renewed either.
 A production deployment would revisit this: short-lived tokens in memory with a
 refresh cookie, or an `HttpOnly` cookie with CSRF tokens. Both need endpoints
 that do not exist yet.
+
+### Resuming an interrupted journey
+
+`ProtectedRoute` remembers the location it turned away, so that logging in lands
+where the user was going rather than dumping them on the project list. That
+remembered value comes from the address bar, which makes it attacker-chosen: a
+link to `https://pulseguard.example/\evil.example` would otherwise send the user
+off-site immediately after a genuine login, with their trust already established
+by the real login form.
+
+Destinations are therefore reduced to a same-site path by `safeRedirectPath`
+before being navigated to — a single-slash-rooted path, or nothing. React Router
+fixed the same class of bug in 7.18, but the check stays in application code: it
+holds regardless of the router version, and "never leave the site on the strength
+of a URL somebody else handed the user" is this application's rule, not a
+dependency's.
 
 ### Authorisation is not in the frontend
 

@@ -1,5 +1,7 @@
 package com.pulseguard.monitorworker.config;
 
+import com.pulseguard.monitorworker.monitoring.HostResolver;
+import java.net.InetAddress;
 import java.time.Clock;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
@@ -29,5 +31,16 @@ public class WorkerConfig {
     @Bean
     public Clock clock() {
         return Clock.systemUTC();
+    }
+
+    /**
+     * The real DNS resolver.
+     *
+     * <p>Exists as a bean only so the SSRF policy can be tested against a
+     * host that resolves to several addresses, which no IP literal can express.
+     */
+    @Bean
+    public HostResolver hostResolver() {
+        return InetAddress::getAllByName;
     }
 }

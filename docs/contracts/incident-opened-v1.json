@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "eventId": "5a60f403-e588-43df-9987-d9a3d2174ec9",
+  "eventType": "INCIDENT_OPENED",
+  "occurredAt": "2026-08-13T06:30:00Z",
+  "incidentId": 41,
+  "projectId": 10,
+  "monitorId": 25,
+  "monitorName": "Payment API",
+  "incidentOpenedAt": "2026-08-13T06:30:00Z",
+  "incidentResolvedAt": null,
+  "triggeringCheckId": 1501,
+  "monitorStatus": "DOWN",
+  "httpStatusCode": 503,
+  "responseTimeMs": 210,
+  "errorType": "UNEXPECTED_STATUS",
+  "errorMessage": "Expected HTTP 200 but received 503"
+}
