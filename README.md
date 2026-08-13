@@ -10,19 +10,18 @@ recovers.
 
 ## Current Status
 
-**Stage 9 — Kafka Event Streaming**
+**Stage 10 — Notification Service**
 
-Incident lifecycle transitions are now **published to Kafka**. When an outage
-opens or ends, the worker writes an event into a transactional outbox in the
-same database transaction as the incident, and a separate job delivers it to the
-broker. Monitoring keeps working whether or not Kafka is reachable.
+PulseGuard now **tells people**. A third backend application consumes the
+incident events from Kafka, works out who belongs to the affected project, and
+emails them — once per event, however many times Kafka delivers it.
 
-Everything is usable from a browser: register and sign in, create projects,
+The full path: a monitor fails → an incident opens → an event reaches Kafka → the
+Notification Service queues an email per project member → the email is sent.
+
+Everything is still usable from a browser: register and sign in, create projects,
 invite members, configure monitors, watch status and history, and read the
 project's incident history.
-
-Still **not implemented**: nothing consumes the events yet. Task 10 introduces
-the Notification Service, which is where anyone actually gets told.
 
 All three applications share one MySQL database: the Control API owns the schema
 and the configuration, the worker executes the checks, and the frontend talks
@@ -116,6 +115,7 @@ V4__create_monitors.sql
 V5__create_monitor_checks.sql
 V6__create_incidents.sql
 V7__create_outbox_events.sql
+V8__create_notification_tables.sql
 ```
 
 Never edit a migration that has already been applied — add a new one.
@@ -133,7 +133,8 @@ pulseguard/
 │   │       ├── java/.../domain/enums/  persisted enums
 │   │       ├── java/.../repository/    Spring Data repositories
 │   │       └── resources/db/migration/ Flyway migrations
-│   └── monitor-worker/     Spring Boot application (independent Maven project)
+│   ├── monitor-worker/     Spring Boot application (independent Maven project)
+│   └── notification-service/  Spring Boot application (independent Maven project)
 ├── frontend/               React + TypeScript + Vite application
 ├── docs/
 │   └── architecture.md
@@ -142,9 +143,10 @@ pulseguard/
 └── README.md
 ```
 
-`backend/` is a plain folder, not a Maven aggregator. `control-api` and
-`monitor-worker` are two fully independent Maven projects and can each be opened
-on their own in IntelliJ IDEA.
+`backend/` is a plain folder, not a Maven aggregator. `control-api`,
+`monitor-worker` and `notification-service` are three fully independent Maven
+projects, each with its own wrapper, and each can be opened on its own in
+IntelliJ IDEA.
 
 ---
 
@@ -262,11 +264,14 @@ The origin above must also be allowed by the Control API's CORS configuration
 (`FRONTEND_ORIGIN`, which already defaults to it). Changing the Vite port means
 changing both.
 
-### Running all three together
+### Running the whole stack
 
-Each process runs in its own terminal, in this order:
+Infrastructure first, then each application in its own terminal:
 
 ```bash
+# MySQL must be running, and Kafka if you want events and email.
+kafka-server-start.sh -daemon <your-kafka>/config/server.properties
+
 # 1. Control API — owns the schema, so it migrates the database first
 cd backend/control-api && ./mvnw spring-boot:run
 
@@ -274,12 +279,21 @@ cd backend/control-api && ./mvnw spring-boot:run
 #    if you want to monitor something on your own machine
 cd backend/monitor-worker && MONITOR_ALLOW_PRIVATE_ADDRESSES=true ./mvnw spring-boot:run
 
-# 3. Frontend
+# 3. Notification Service — needs MySQL; Kafka and SMTP can arrive late
+cd backend/notification-service && ./mvnw spring-boot:run
+
+# 4. Frontend
 cd frontend && npm run dev
 ```
 
-The frontend works without the worker — monitors simply stay `UNKNOWN`, because
-nothing is checking them.
+Each layer degrades on its own rather than taking the others down:
+
+| Missing | What still works |
+| --- | --- |
+| Monitor Worker | everything except checks; monitors stay `UNKNOWN` |
+| Kafka | monitoring and incidents; events queue in the outbox |
+| Notification Service | everything except email; events wait on the topic |
+| SMTP | everything except sending; emails queue and retry |
 
 ---
 
@@ -372,6 +386,194 @@ disagrees with the schema, startup fails.
 cd frontend
 npm run build
 ```
+
+---
+
+## Notification Service
+
+The third backend application. It consumes the incident events from Kafka and
+turns them into email:
+
+```text
+Kafka incident event
+        ↓
+   ConsumedEvent          ← the inbox: this event has been dealt with
+        ↓
+NotificationDelivery      ← one per project member, PENDING
+        ↓
+      Email               ← sent later, on its own schedule
+```
+
+It creates no incidents and checks no endpoints. Its job begins after something
+else has already decided that an outage happened.
+
+### Deduplication is the whole problem
+
+Task 09 publishes **at-least-once**, so the same event can arrive twice — after a
+consumer rebalance, a redelivery, or a crash between the broker's acknowledgement
+and the offset commit. Without a guard, the second arrival means a second email
+to everyone.
+
+Every event carries a globally unique `eventId`, and that is what identity means
+here:
+
+```text
+event arrives
+     ↓
+has this eventId been consumed before?
+   ┌─────────┴─────────┐
+  no                  yes
+   ↓                   ↓
+record it          do nothing
+queue emails       return successfully
+```
+
+The `consumed_events` table is the inbox, with `UNIQUE(event_id)` as the durable
+guard — an in-memory set would forget everything on restart. A second constraint,
+`UNIQUE(event_id, recipient_email, channel)`, means even a bug that processed one
+event twice could not queue one person the same email twice.
+
+**Kafka's offset is deliberately not the identity.** The same event redelivered
+arrives at a different offset; the offset is stored for tracing only. This was
+verified by replaying a real message: consumed at offset 4, replayed at offset 5,
+recognised and ignored.
+
+### Why email is not sent from the Kafka listener
+
+Sending inside the listener would tie Kafka consumption to SMTP availability: a
+mail server being down would fail the listener, block the offset, and make Kafka
+redeliver the same incident until the mail server came back — turning a delivery
+problem into an event-processing problem.
+
+Instead the listener does the durable, fast part in one short database
+transaction:
+
+```text
+one MySQL transaction
+    ├── insert consumed_events
+    └── insert notification_deliveries (PENDING, one per recipient)
+              ↓
+           commit           ← Kafka can now safely commit the offset
+```
+
+and a separate scheduler sends the mail afterwards. `NotificationEventProcessor`
+has **no `JavaMailSender`**, and a test asserts that it never will.
+
+### Who gets emailed
+
+**Every enabled member of the affected project**, whatever their role —
+`PROJECT_ADMIN` and `VIEWER` alike. A viewer is still someone who cares that the
+service is down.
+
+Not emailed: disabled accounts (`users.enabled = false`), and system
+administrators who are not members of the project. Being able to see every
+project is not the same as wanting every project's email.
+
+There are no notification preferences yet.
+
+The recipient address is a **snapshot** stored on the delivery. If someone
+changes their email afterwards, a queued notification still goes where it was
+addressed when the incident happened.
+
+### The emails
+
+Plain text. It renders everywhere and is easy to assert on in a test.
+
+```text
+Subject: [PulseGuard] Incident opened: Payment API
+
+PulseGuard detected an outage.
+
+Monitor: Payment API
+Incident ID: 41
+Status: OPEN
+Opened at: 2026-08-13T06:30:00Z
+
+Failing check:
+HTTP Status: 503
+Response Time: 210 ms
+Error: UNEXPECTED_STATUS
+Details: Expected HTTP 200 but received 503
+
+View incident:
+http://localhost:5173/incidents/41
+```
+
+A resolution email says `Incident resolved`, carries both timestamps and a
+computed duration, and describes the recovering check.
+
+> **The monitor's URL is never included**, because the event contract excludes
+> it — URLs carry query parameters, tokens and internal hostnames. Nor are
+> credentials, tokens or response bodies. The subject is also stripped of CR and
+> LF: a monitor name is user-supplied text, and a subject is a mail header.
+
+### Delivery, retries and giving up
+
+```text
+PENDING ──── mail server accepts ────► SENT
+   │
+   │ attempt fails
+   ▼
+PENDING (attempt_count + 1, retry in 30s)
+   │
+   │ attempts run out
+   ▼
+FAILED  ← kept for inspection, never retried automatically
+```
+
+Deliveries are independent: one bad address does not delay anyone else's
+notification. No transaction is held open across the SMTP conversation.
+
+### Delivery semantics, stated honestly
+
+Two different guarantees, and it matters not to confuse them:
+
+| | Guarantee |
+| --- | --- |
+| **Kafka ingestion** | **idempotent** — the same `eventId` is processed once, however many times it is delivered |
+| **Email delivery** | **at-least-once / best effort** — a duplicate email is possible |
+
+The email window is unavoidable and worth naming:
+
+```text
+the mail server accepts the message
+        ↓
+the service crashes before SENT is committed
+        ↓
+the delivery is still PENDING, and is retried
+        ↓
+the recipient may receive it twice
+```
+
+Sending an email is an external side effect that cannot be rolled back, so **no
+system can promise exactly-once email**. PulseGuard does not claim to.
+
+### Configuration
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `DB_URL` / `DB_USERNAME` / `DB_PASSWORD` | local `pulseguard` | The shared database |
+| `KAFKA_BOOTSTRAP_SERVERS` | `localhost:9092` | Broker addresses |
+| `KAFKA_INCIDENT_TOPIC` | `pulseguard.incident-events.v1` | Topic to consume |
+| `KAFKA_NOTIFICATION_GROUP_ID` | `pulseguard-notification-service-v1` | Consumer group — keep it stable |
+| `MAIL_HOST` / `MAIL_PORT` | `localhost` / `1025` | SMTP server |
+| `MAIL_USERNAME` / `MAIL_PASSWORD` | empty | SMTP credentials, if the server wants them |
+| `MAIL_SMTP_AUTH` / `MAIL_SMTP_STARTTLS_ENABLE` | `false` / `false` | SMTP security |
+| `MAIL_FROM` | `pulseguard@localhost` | Envelope sender |
+| `FRONTEND_BASE_URL` | `http://localhost:5173` | Used to build the incident link |
+| `NOTIFICATION_DELIVERY_INTERVAL` | `PT10S` | How often to send pending email |
+| `NOTIFICATION_BATCH_SIZE` | `50` | Most deliveries attempted per cycle |
+| `NOTIFICATION_MAX_ATTEMPTS` | `5` | Attempts before a delivery is left FAILED |
+| `NOTIFICATION_RETRY_DELAY` | `PT30S` | Wait between attempts |
+
+Any SMTP server works — nothing here is specific to one provider. The consumer
+group id should stay stable: Kafka uses it to remember how far the service has
+read, so changing it replays the topic.
+
+There is deliberately **no REST API** for notifications, deliveries or retries.
+Delivery state is inspected in the database.
+
+Runs on **port 8082**, with `/actuator/health` and `/api/v1/system/info`.
 
 ---
 
@@ -1070,7 +1272,6 @@ http://localhost:8081/api/v1/system/info
 Later stages will introduce, roughly in this order:
 
 ```text
-Notifications
 Docker
 SonarQube
 Jenkins
@@ -1079,4 +1280,4 @@ Kubernetes
 Observability
 ```
 
-The next stage is **Task 10 — Notification Service**.
+The next stage is **Task 11 — Testing, Reliability and Security Hardening**.

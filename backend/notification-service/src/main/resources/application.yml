@@ -1,0 +1,96 @@
+spring:
+  application:
+    name: pulseguard-notification-service
+
+  datasource:
+    # The same database the Control API and Monitor Worker use. This service
+    # owns two tables in it and no schema.
+    url: "${DB_URL:jdbc:mysql://localhost:3306/pulseguard?connectionTimeZone=UTC&preserveInstants=true}"
+    username: ${DB_USERNAME:root}
+    password: "${DB_PASSWORD:Ayana2019@}"
+    driver-class-name: com.mysql.cj.jdbc.Driver
+
+  jpa:
+    # Flyway lives entirely in the Control API. This service only checks that
+    # the tables it maps match what it expects, and never alters them.
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    consumer:
+      # The payload is parsed by the application rather than by a typed
+      # deserializer, so failures are described in application code and the raw
+      # text is available to store.
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      # Offsets are committed by the listener container after the listener
+      # returns, never on a timer while processing is still in flight.
+      enable-auto-commit: false
+      # A new consumer group reads the topic from the beginning. Deduplication
+      # by eventId is what stops that becoming a flood of repeat emails.
+      auto-offset-reset: earliest
+    listener:
+      # Commit after each record, so a crash can at worst repeat one event —
+      # which the inbox recognises anyway.
+      ack-mode: RECORD
+
+  mail:
+    # Generic SMTP. Nothing here is specific to one provider.
+    host: ${MAIL_HOST:localhost}
+    port: ${MAIL_PORT:1025}
+    username: ${MAIL_USERNAME:}
+    password: ${MAIL_PASSWORD:}
+    properties:
+      mail:
+        smtp:
+          auth: ${MAIL_SMTP_AUTH:false}
+          starttls:
+            enable: ${MAIL_SMTP_STARTTLS_ENABLE:false}
+          # Bounded, so an unreachable mail server fails the attempt rather
+          # than hanging the delivery cycle.
+          connectiontimeout: ${MAIL_CONNECTION_TIMEOUT_MS:10000}
+          timeout: ${MAIL_TIMEOUT_MS:10000}
+          writetimeout: ${MAIL_WRITE_TIMEOUT_MS:10000}
+
+server:
+  port: ${SERVER_PORT:8082}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  health:
+    mail:
+      # Deliberately off. Boot's mail health check opens an SMTP connection on
+      # every probe and reports the whole application DOWN when it fails —
+      # which contradicts the design: an unreachable mail server is a survivable
+      # condition here, not a broken service. Deliveries are queued durably and
+      # retried, so the service is doing its job precisely when SMTP is down.
+      # Probing it would also restart a perfectly healthy process.
+      enabled: false
+
+app:
+  kafka:
+    # The versioned topic the Monitor Worker publishes to.
+    incident-topic: ${KAFKA_INCIDENT_TOPIC:pulseguard.incident-events.v1}
+    # Stable across restarts: Kafka uses it to remember how far this service
+    # has read. Changing it would replay the topic and re-notify everyone.
+    group-id: ${KAFKA_NOTIFICATION_GROUP_ID:pulseguard-notification-service-v1}
+
+  notification:
+    from-address: ${MAIL_FROM:pulseguard@localhost}
+    # Used to build the incident link inside each email.
+    frontend-base-url: ${FRONTEND_BASE_URL:http://localhost:5173}
+    delivery-interval: ${NOTIFICATION_DELIVERY_INTERVAL:PT10S}
+    batch-size: ${NOTIFICATION_BATCH_SIZE:50}
+    # Finite on purpose: an address that will never accept mail should stop
+    # consuming attempts and become visible as FAILED.
+    max-attempts: ${NOTIFICATION_MAX_ATTEMPTS:5}
+    retry-delay: ${NOTIFICATION_RETRY_DELAY:PT30S}
