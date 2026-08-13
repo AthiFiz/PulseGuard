@@ -51,6 +51,16 @@
 			<scope>runtime</scope>
 		</dependency>
 
+		<!--
+			Kafka lives only in the worker. The Control API and the frontend
+			have no producer, no consumer and no broker dependency: incidents
+			are announced by whoever observed them.
+		-->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-kafka</artifactId>
+		</dependency>
+
 		<dependency>
 			<groupId>org.projectlombok</groupId>
 			<artifactId>lombok</artifactId>

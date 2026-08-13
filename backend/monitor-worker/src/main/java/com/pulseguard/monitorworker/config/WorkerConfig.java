@@ -12,13 +12,18 @@ import org.springframework.scheduling.annotation.EnableScheduling;
  * <p>{@link EnableScheduling} is what makes {@code @Scheduled} methods run at
  * all — without it the polling method would be dead code.
  *
+ * <p>Two scheduled jobs run here — monitor polling and outbox publishing — so
+ * the scheduler pool is sized for both. With the default single thread, a
+ * publishing cycle waiting on an unresponsive broker would hold up the next
+ * monitor check, which is exactly the coupling the outbox exists to avoid.
+ *
  * <p>The {@link Clock} follows the pattern established in the Control API:
  * business code takes it rather than calling {@code Instant.now()}, so tests
  * can pin time and assert scheduling exactly.
  */
 @Configuration
 @EnableScheduling
-@EnableConfigurationProperties(MonitoringProperties.class)
+@EnableConfigurationProperties({MonitoringProperties.class, KafkaProperties.class})
 public class WorkerConfig {
 
     @Bean
