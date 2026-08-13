@@ -1,7 +1,7 @@
 # PulseGuard Architecture
 
-This document describes the architecture as it stands at **Stage 8 — Incident
-Management**, and the shape it is intended to grow into.
+This document describes the architecture as it stands at **Stage 9 — Kafka
+Event Streaming**, and the shape it is intended to grow into.
 
 Anything marked **[NOT YET IMPLEMENTED]** does not exist in the codebase.
 
@@ -63,8 +63,10 @@ Implemented today:
 - **monitoring reads**: check history, monitor statistics, project dashboard
 - **incident reads**: project incident history and incident detail
 
-It **never writes an incident.** Opening and resolving one is a statement about
-what a check observed, so only the worker may make it.
+It **never writes an incident**, and never publishes an event. Opening and
+resolving one is a statement about what a check observed, so only the worker may
+make it. The Control API owns the `outbox_events` migration because it owns the
+schema, but never reads or writes that table.
 
 Future responsibilities **[NOT YET IMPLEMENTED]**:
 
@@ -84,10 +86,13 @@ Implemented today:
 - **persisting every check** to `monitor_checks`
 - **updating monitor state**: consecutive failures, and UP/DOWN transitions
 - **opening and resolving incidents** from those transitions
+- **writing incident events to a transactional outbox**, in that same transaction
+- **publishing outbox events to Kafka** on a separate schedule
 
 It connects to the same MySQL database as the Control API but maps only
-`monitors`, `monitor_checks` and `incidents`, with `project_id`, `monitor_id`
-and the check references as plain `Long` columns rather than JPA associations —
+`monitors`, `monitor_checks`, `incidents` and `outbox_events`, with
+`project_id`, `monitor_id` and the check references as plain `Long` columns
+rather than JPA associations —
 the worker performs no project authorization, so the whole project-management
 model would be dead weight.
 
@@ -95,9 +100,12 @@ model would be dead weight.
 uses `ddl-auto=validate` and would fail to start if the schema did not match
 what it expects.
 
+**Kafka lives here and nowhere else.** The Control API has no producer and no
+consumer, and the frontend knows nothing about the broker: an incident is
+announced by whichever component observed it.
+
 Future responsibilities **[NOT YET IMPLEMENTED]**:
 
-- publishing events to Kafka
 - coordinating multiple worker replicas
 
 ---
@@ -212,7 +220,8 @@ HealthCheckResult                outcome, status, duration, error type
 MonitorResultService             ONE short transaction:
         │                          insert monitor_checks
         │                          update monitors state + schedule
-        ▼                          open or resolve the incident
+        │                          open or resolve the incident
+        ▼                          insert the outbox event announcing it
 ```
 
 **No database transaction is ever held open across the HTTP call.** The due
@@ -221,9 +230,10 @@ the result is written in its own short transaction afterwards. A monitored
 endpoint that takes 30 seconds to answer therefore cannot pin a database
 connection for 30 seconds.
 
-The check row, the monitor's new state and the incident change are written in
-**that same short transaction**, so a monitor can never be committed as `DOWN`
-without the incident that explains it.
+The check row, the monitor's new state, the incident change and the outbox event
+announcing it are written in **that same short transaction**, so a monitor can
+never be committed as `DOWN` without the incident that explains it, nor an
+incident without the event that announces it.
 
 Monitors are processed **sequentially**, and one failing monitor is caught and
 logged so the rest of the cycle continues. A failure of the polling query itself
@@ -304,11 +314,134 @@ If a monitor is somehow `DOWN` with no open incident — data from an interrupte
 run, or an older environment — the next failed check opens one defensively and
 logs a warning. That is a repair path, not a normal one.
 
+### Events, and why Kafka is outside the transaction
+
+An incident transition has to reach the outside world. The obvious way is to
+save the incident and then send to Kafka — and it is wrong in a way that only
+shows up in production.
+
+```text
+save incident  →  send to Kafka  →  commit
+```
+
+Three problems, in increasing order of how much they hurt:
+
+| Problem | Consequence |
+| --- | --- |
+| The two are separate systems | A crash between them leaves the database and the topic disagreeing, with no way to tell which is right |
+| A slow broker is inside the transaction | Monitoring slows down because a *message bus* is busy |
+| An unreachable broker fails the transaction | A monitor cannot be marked `DOWN` because nobody could be told it was down |
+
+The third is the unacceptable one. PulseGuard's core job is detecting outages;
+making that depend on a broker inverts the priority.
+
+So the event is written as an ordinary row in the same transaction:
+
+```text
+health check completes (no transaction open)
+             │
+             ▼
+   MonitorResultService
+             │
+   ┌─────────┴──────────── one short MySQL transaction ───────────┐
+   │  insert  monitor_checks                                       │
+   │  update  monitors                                             │
+   │  insert/update  incidents                                     │
+   │  insert  outbox_events        ← the event, durable and local  │
+   └─────────┬─────────────────────────────────────────────────────┘
+             ▼
+          COMMIT
+             │
+             ▼
+    OutboxPublisher (separate schedule, separate thread)
+             │
+             ▼
+           Kafka
+             │
+             ▼
+   [Task 10: Notification Service]
+```
+
+Either the incident and its event both exist, or neither does. Delivery is a
+separate concern with a separate failure mode, and
+**`MonitorResultService` has no `KafkaTemplate`** — it could not contact a
+broker if it tried.
+
+There is deliberately **no distributed transaction**: no XA, no JTA, no
+`ChainedKafkaTransactionManager`. The database transaction is the only atomic
+unit, and Kafka is reached afterwards.
+
+### The publisher
+
+Every five seconds it asks for unpublished rows, oldest first, capped by a batch
+size, and sends them one at a time.
+
+Three properties are worth stating because each is a decision:
+
+- **It waits for the broker's acknowledgement** before marking a row published.
+  Marking on `send()` returning would record a delivery that may never have
+  happened.
+- **It stops at the first failure** rather than skipping past it. Events for one
+  monitor are a sequence, and delivering the end of an outage whose beginning
+  never arrived would tell a consumer something untrue. The cost is
+  head-of-line blocking, documented below rather than hidden.
+- **No transaction spans the send.** The pending rows come back detached, the
+  network wait happens with no connection held, and the outcome is written in
+  another short transaction.
+
+Failure is recorded, not swallowed: `attempt_count` increments,
+`last_attempt_at` and a bounded `last_error` are stored, and the row stays
+pending. Nothing is ever dropped and nothing gives up after N attempts — the
+payload is generated entirely by PulseGuard, so a permanent failure means
+something a human should see.
+
+### When Kafka is unavailable
+
+```text
+Kafka unavailable
+        ↓
+checks keep running · incidents keep opening and resolving
+        ↓
+outbox rows accumulate as pending
+        ↓
+broker returns
+        ↓
+the publisher drains the backlog, oldest first
+```
+
+This is the property the whole design exists for, and it was verified by
+stopping the broker mid-outage: monitoring continued, an incident opened with no
+broker running, the event stayed pending with its attempt recorded, and it
+published automatically once Kafka came back.
+
+The worker also **starts** with no broker reachable. Topic creation is
+best-effort; failing to create a topic is not a reason to refuse to monitor.
+
+### Delivery semantics
+
+**At-least-once.** A consumer may see the same event twice:
+
+```text
+broker acknowledges the record
+        ↓
+the worker crashes before published_at is committed
+        ↓
+the event is sent again after restart
+```
+
+Every event carries a globally unique `eventId`, stable across republication, so
+a consumer can recognise the repeat. Task 10's consumer owns that deduplication.
+
+Producer idempotence is enabled and is a **different** mechanism: it stops the
+producer's own retries duplicating a record within one session. It says nothing
+about the window above, and the two together still do not make the pipeline
+exactly-once.
+
 ### Not implemented at this stage
 
-**No Kafka events and no notifications.** An incident opening is recorded in the
-database and shown in the UI; nobody is told. Event publishing arrives in the
-Kafka stage, and email in the notification stage.
+**No notifications, and no consumer.** Incident events reach Kafka and stop
+there — nothing reads the topic. Task 10 introduces the Notification Service,
+the first real consumer, and with it the email that finally tells someone.
 
 There is no acknowledgement, assignment, severity or comment thread — all of
 those need a person acting on an incident, which the product does not yet offer.
@@ -662,6 +795,10 @@ project_members   user/project membership; unique (project_id, user_id)
 monitors          monitored endpoints, their configuration and current state
 monitor_checks    the result of each individual check; written by the worker,
                   read by the Control API's reporting endpoints
+outbox_events     one row per event awaiting delivery to Kafka; written and
+                  published by the worker. No foreign keys: an event records
+                  something that already happened and must stay publishable
+                  even if the monitor it describes is deleted a moment later
 incidents         one row per continuous outage; written by the worker,
                   read by the Control API. monitor_id CASCADEs, and the two
                   check references are SET NULL so losing a check cannot
@@ -725,6 +862,30 @@ Stated here so they are not mistaken for oversights.
 
 ---
 
+## Known limitations of event streaming
+
+- **At-least-once delivery.** A consumer may see an event twice; `eventId` is
+  what makes deduplication possible, and no consumer implements it until
+  Task 10.
+- **One worker, one publisher.** Pending rows are claimed by nothing — a second
+  worker would publish the same events again. Distributed outbox claiming
+  (`SELECT … FOR UPDATE SKIP LOCKED`) belongs with the scaling stage.
+- **Head-of-line blocking.** The publisher stops at the first failure to keep
+  ordering, so one permanently failing row would hold up everything behind it.
+  Chosen deliberately over reordering; there is no dead-letter table, no
+  quarantine and no skip-after-N-attempts.
+- **Outbox rows are kept forever.** Published events are never deleted. Useful
+  for inspection now, but a retention policy will eventually be needed.
+- **No Schema Registry.** Compatibility rests on `schemaVersion` inside the
+  payload and the `.v1` topic suffix.
+- **No Kafka authentication or TLS.** The local broker is unauthenticated;
+  securing it is a deployment concern.
+- **No automated broker test.** The publisher is covered by unit tests with a
+  mocked `KafkaTemplate`. Broker-backed integration testing is deferred with the
+  rest of that scope, so the build needs no Kafka, Docker or Testcontainers.
+
+---
+
 ## Known limitations of incident management
 
 Stated here so they are not mistaken for oversights.
@@ -753,7 +914,7 @@ Stated here so they are not mistaken for oversights.
 
 ---
 
-## Technology Notes (Stage 8)
+## Technology Notes (Stage 9)
 
 | Area           | Choice                                                          |
 | -------------- | --------------------------------------------------------------- |
@@ -770,6 +931,8 @@ Stated here so they are not mistaken for oversights.
 | Frontend HTTP  | the browser `fetch` API — no HTTP client library                 |
 | Frontend tests | Vitest + React Testing Library, jsdom                            |
 | Incidents      | worker-written rows; Control API reads only                      |
+| Events         | Spring Kafka 4.1 (`spring-boot-starter-kafka`), worker only      |
+| Event delivery | transactional outbox → scheduled publisher → Kafka               |
 
 The frontend deliberately carries no state-management, styling, charting or HTTP
 library. At this size each would add a dependency and a set of conventions

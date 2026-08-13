@@ -10,6 +10,30 @@ spring:
     password: "${DB_PASSWORD:Ayana2019@}"
     driver-class-name: com.mysql.cj.jdbc.Driver
 
+  kafka:
+    # A broker being unreachable is not fatal: the worker still starts, still
+    # monitors, and the outbox simply accumulates until Kafka returns.
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      # Wait for all in-sync replicas. An event acknowledged by one broker that
+      # then fails would be lost, and the outbox row would already be marked
+      # published.
+      acks: all
+      properties:
+        # Stops the producer's own retries turning one record into several.
+        # This is not exactly-once: it says nothing about the window between a
+        # broker acknowledging a record and the outbox row being marked.
+        enable.idempotence: true
+
+  task:
+    scheduling:
+      # Monitor polling and outbox publishing are separate jobs. One thread
+      # would let a slow broker delay monitoring.
+      pool:
+        size: 2
+
   jpa:
     # Flyway lives entirely in the Control API. The worker only checks that the
     # tables it maps match what it expects, and never alters them.
@@ -39,3 +63,17 @@ app:
     # want to monitor something on localhost. Cloud metadata stays blocked
     # either way.
     allow-private-addresses: ${MONITOR_ALLOW_PRIVATE_ADDRESSES:false}
+
+  kafka:
+    # Versioned on purpose: an incompatible schema change gets a new topic
+    # rather than quietly breaking existing consumers.
+    incident-topic: ${KAFKA_INCIDENT_TOPIC:pulseguard.incident-events.v1}
+    topic-partitions: ${KAFKA_INCIDENT_TOPIC_PARTITIONS:3}
+    # One replica suits a single-broker development machine. Production
+    # replication belongs to the deployment stage.
+    topic-replication-factor: ${KAFKA_INCIDENT_TOPIC_REPLICATION:1}
+    # How often to look for unpublished events — unrelated to monitor polling.
+    outbox-publish-interval: ${OUTBOX_PUBLISH_INTERVAL:PT5S}
+    outbox-batch-size: ${OUTBOX_BATCH_SIZE:50}
+    # Bounded, so an unresponsive broker cannot stall the publisher forever.
+    send-timeout: ${KAFKA_SEND_TIMEOUT:PT10S}

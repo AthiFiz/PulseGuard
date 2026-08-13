@@ -5,7 +5,9 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import com.pulseguard.monitorworker.domain.Incident;
@@ -15,6 +17,7 @@ import com.pulseguard.monitorworker.enums.IncidentStatus;
 import com.pulseguard.monitorworker.enums.MonitorCheckErrorType;
 import com.pulseguard.monitorworker.enums.MonitorCheckOutcome;
 import com.pulseguard.monitorworker.enums.MonitorStatus;
+import com.pulseguard.monitorworker.outbox.IncidentEventRecorder;
 import com.pulseguard.monitorworker.repository.IncidentRepository;
 import com.pulseguard.monitorworker.repository.MonitorCheckRepository;
 import com.pulseguard.monitorworker.repository.MonitorRepository;
@@ -39,6 +42,10 @@ import org.springframework.test.util.ReflectionTestUtils;
  * <p>These are interaction tests. They prove the service asks the repositories
  * for the right things in the right order — not that the enclosing transaction
  * commits atomically, which only a real database could show.
+ *
+ * <p>The event recorder is mocked here: this file is about when an event is
+ * recorded, while {@code IncidentEventRecorderTest} covers what the event
+ * actually contains.
  */
 @ExtendWith(MockitoExtension.class)
 class MonitorResultServiceTest {
@@ -56,6 +63,9 @@ class MonitorResultServiceTest {
 
     @Mock
     private IncidentRepository incidentRepository;
+
+    @Mock
+    private IncidentEventRecorder incidentEventRecorder;
 
     @InjectMocks
     private MonitorResultService monitorResultService;
@@ -531,6 +541,150 @@ class MonitorResultServiceTest {
         verify(incidentRepository, never()).save(any());
         verify(incidentRepository, never())
                 .findFirstByMonitorIdAndStatusOrderByOpenedAtAsc(any(), any());
+    }
+
+    // ------------------------------------------------------- outbox events
+
+    /** No outage was declared, so there is nothing to announce. */
+    @Test
+    void aFailureBelowTheThresholdRecordsNoEvent() {
+        givenMonitorExists(monitor(MonitorStatus.UP, 0));
+
+        monitorResultService.recordResult(MONITOR_ID, failure());
+
+        verifyNoInteractions(incidentEventRecorder);
+    }
+
+    @Test
+    void openingAnIncidentRecordsExactlyOneOpenedEvent() {
+        Monitor monitor = monitor(MonitorStatus.UP, FAILURE_THRESHOLD - 1);
+        givenMonitorExists(monitor);
+        givenNoOpenIncident();
+
+        monitorResultService.recordResult(MONITOR_ID, failure());
+
+        ArgumentCaptor<Incident> incident = ArgumentCaptor.forClass(Incident.class);
+        ArgumentCaptor<MonitorCheck> check = ArgumentCaptor.forClass(MonitorCheck.class);
+        verify(incidentEventRecorder).recordIncidentOpened(eq(monitor), incident.capture(), check.capture());
+        verify(incidentEventRecorder, never()).recordIncidentResolved(any(), any(), any());
+
+        // The event describes the incident that was just opened, and the check
+        // that caused it — the same one written to monitor_checks.
+        assertThat(incident.getValue().getStatus()).isEqualTo(IncidentStatus.OPEN);
+        assertThat(check.getValue().getId()).isEqualTo(capturedCheck().getId());
+    }
+
+    @Test
+    void anUnknownMonitorGoingDownRecordsAnOpenedEvent() {
+        Monitor monitor = monitor(MonitorStatus.UNKNOWN, 0);
+        ReflectionTestUtils.setField(monitor, "failureThreshold", 1);
+        givenMonitorExists(monitor);
+        givenNoOpenIncident();
+
+        monitorResultService.recordResult(MONITOR_ID, failure());
+
+        verify(incidentEventRecorder).recordIncidentOpened(eq(monitor), any(), any());
+    }
+
+    /** The outage has already been announced. Saying it again would be noise. */
+    @Test
+    void aFurtherFailureDuringOneOutageRecordsNoSecondEvent() {
+        givenMonitorExists(monitor(MonitorStatus.DOWN, 5));
+        givenOpenIncident(openIncident());
+
+        monitorResultService.recordResult(MONITOR_ID, failure());
+
+        verifyNoInteractions(incidentEventRecorder);
+    }
+
+    /** A defensively opened incident is still a real one, and is announced. */
+    @Test
+    void aDefensivelyOpenedIncidentRecordsAnOpenedEvent() {
+        givenMonitorExists(monitor(MonitorStatus.DOWN, 9));
+        givenNoOpenIncident();
+
+        monitorResultService.recordResult(MONITOR_ID, failure());
+
+        verify(incidentEventRecorder).recordIncidentOpened(any(), any(), any());
+    }
+
+    @Test
+    void resolvingAnIncidentRecordsExactlyOneResolvedEvent() {
+        Monitor monitor = monitor(MonitorStatus.DOWN, 4);
+        givenMonitorExists(monitor);
+        Incident existing = openIncident();
+        givenOpenIncident(existing);
+
+        monitorResultService.recordResult(MONITOR_ID, success());
+
+        ArgumentCaptor<MonitorCheck> check = ArgumentCaptor.forClass(MonitorCheck.class);
+        verify(incidentEventRecorder).recordIncidentResolved(eq(monitor), eq(existing), check.capture());
+        verify(incidentEventRecorder, never()).recordIncidentOpened(any(), any(), any());
+
+        // Recorded after resolve(), so the event sees the resolution.
+        assertThat(existing.getStatus()).isEqualTo(IncidentStatus.RESOLVED);
+        assertThat(check.getValue().getOutcome()).isEqualTo(MonitorCheckOutcome.SUCCESS);
+    }
+
+    @Test
+    void aSuccessWithNothingOpenRecordsNoEvent() {
+        givenMonitorExists(monitor(MonitorStatus.UP, 0));
+        givenNoOpenIncident();
+
+        monitorResultService.recordResult(MONITOR_ID, success());
+
+        verifyNoInteractions(incidentEventRecorder);
+    }
+
+    /** Pausing is not recovery, so it announces nothing. */
+    @Test
+    void aSuccessArrivingAfterAPauseRecordsNoEvent() {
+        Monitor monitor = monitor(MonitorStatus.PAUSED, 0);
+        monitor.setNextCheckAt(null);
+        givenMonitorExists(monitor);
+
+        monitorResultService.recordResult(MONITOR_ID, success());
+
+        verifyNoInteractions(incidentEventRecorder);
+    }
+
+    /** Resume leaves the monitor UNKNOWN; the first real success still resolves. */
+    @Test
+    void theFirstSuccessAfterAResumeRecordsTheResolvedEvent() {
+        Monitor monitor = monitor(MonitorStatus.UNKNOWN, 0);
+        givenMonitorExists(monitor);
+        Incident fromBeforeThePause = openIncident();
+        givenOpenIncident(fromBeforeThePause);
+
+        monitorResultService.recordResult(MONITOR_ID, success());
+
+        verify(incidentEventRecorder).recordIncidentResolved(eq(monitor), eq(fromBeforeThePause), any());
+    }
+
+    @Test
+    void aResultForADeletedMonitorRecordsNoEvent() {
+        when(monitorRepository.findById(MONITOR_ID)).thenReturn(Optional.empty());
+
+        monitorResultService.recordResult(MONITOR_ID, success());
+
+        verifyNoInteractions(incidentEventRecorder);
+    }
+
+    /** Each transition is announced once: two outages produce three events. */
+    @Test
+    void eachLifecycleTransitionIsAnnouncedExactlyOnce() {
+        Monitor monitor = monitor(MonitorStatus.DOWN, 3);
+        givenMonitorExists(monitor);
+        Incident first = openIncident();
+        when(incidentRepository.findFirstByMonitorIdAndStatusOrderByOpenedAtAsc(MONITOR_ID, IncidentStatus.OPEN))
+                .thenReturn(Optional.of(first), Optional.empty());
+
+        monitorResultService.recordResult(MONITOR_ID, success());
+        ReflectionTestUtils.setField(monitor, "failureThreshold", 1);
+        monitorResultService.recordResult(MONITOR_ID, failure());
+
+        verify(incidentEventRecorder).recordIncidentResolved(any(), any(), any());
+        verify(incidentEventRecorder).recordIncidentOpened(any(), any(), any());
     }
 
     // ----------------------------------------------------------------- setup

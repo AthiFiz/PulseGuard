@@ -5,6 +5,7 @@ import com.pulseguard.monitorworker.domain.Monitor;
 import com.pulseguard.monitorworker.domain.MonitorCheck;
 import com.pulseguard.monitorworker.enums.IncidentStatus;
 import com.pulseguard.monitorworker.enums.MonitorStatus;
+import com.pulseguard.monitorworker.outbox.IncidentEventRecorder;
 import com.pulseguard.monitorworker.repository.IncidentRepository;
 import com.pulseguard.monitorworker.repository.MonitorCheckRepository;
 import com.pulseguard.monitorworker.repository.MonitorRepository;
@@ -21,8 +22,12 @@ import org.springframework.transaction.annotation.Transactional;
  *
  * <p>Runs in one short transaction, entered only after the HTTP request has
  * already finished — a database transaction is never held open across a network
- * call. The check row, the monitor's new state and the incident change are
- * therefore committed together or not at all.
+ * call. The check row, the monitor's new state, the incident change and the
+ * outbox event announcing it are therefore committed together or not at all.
+ *
+ * <p>Nothing here talks to Kafka. An incident transition writes an outbox row
+ * and stops; delivery is a separate concern with a separate schedule, so a
+ * broker outage cannot stop a monitor being marked DOWN.
  */
 @Slf4j
 @Service
@@ -32,6 +37,7 @@ public class MonitorResultService {
     private final MonitorRepository monitorRepository;
     private final MonitorCheckRepository monitorCheckRepository;
     private final IncidentRepository incidentRepository;
+    private final IncidentEventRecorder incidentEventRecorder;
 
     @Transactional
     public void recordResult(Long monitorId, HealthCheckResult result) {
@@ -144,6 +150,7 @@ public class MonitorResultService {
         Incident incident = open.get();
         incident.resolve(check.getCheckedAt(), check.getId());
         incidentRepository.save(incident);
+        incidentEventRecorder.recordIncidentResolved(monitor, incident, check);
 
         log.info(
                 "Incident resolved: incidentId={}, monitorId={}, name={}, openedAt={}, resolvedAt={}",
@@ -176,6 +183,7 @@ public class MonitorResultService {
 
         Incident incident = incidentRepository.save(
                 new Incident(monitor.getId(), check.getCheckedAt(), check.getId()));
+        incidentEventRecorder.recordIncidentOpened(monitor, incident, check);
 
         log.info(
                 "Incident opened: incidentId={}, monitorId={}, name={}, openedAt={}",

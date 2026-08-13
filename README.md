@@ -10,18 +10,19 @@ recovers.
 
 ## Current Status
 
-**Stage 8 — Incident Management**
+**Stage 9 — Kafka Event Streaming**
 
-PulseGuard now keeps a record of **outages**, not just checks. When a monitor
-reaches its failure threshold an incident opens; when the endpoint answers again
-it resolves. Repeated failures during one outage stay one incident.
+Incident lifecycle transitions are now **published to Kafka**. When an outage
+opens or ends, the worker writes an event into a transactional outbox in the
+same database transaction as the incident, and a separate job delivers it to the
+broker. Monitoring keeps working whether or not Kafka is reachable.
 
 Everything is usable from a browser: register and sign in, create projects,
 invite members, configure monitors, watch status and history, and read the
 project's incident history.
 
-Still **not implemented**: Kafka and notifications. An incident opening is a row
-in the database and a red badge in the UI — nobody is told.
+Still **not implemented**: nothing consumes the events yet. Task 10 introduces
+the Notification Service, which is where anyone actually gets told.
 
 All three applications share one MySQL database: the Control API owns the schema
 and the configuration, the worker executes the checks, and the frontend talks
@@ -114,6 +115,7 @@ V3__create_project_members.sql
 V4__create_monitors.sql
 V5__create_monitor_checks.sql
 V6__create_incidents.sql
+V7__create_outbox_events.sql
 ```
 
 Never edit a migration that has already been applied — add a new one.
@@ -370,6 +372,205 @@ disagrees with the schema, startup fails.
 cd frontend
 npm run build
 ```
+
+---
+
+## Kafka Event Streaming
+
+When an incident opens or resolves, PulseGuard publishes an event:
+
+```text
+Incident lifecycle transition
+            ↓
+   Transactional Outbox        ← same MySQL transaction as the incident
+            ↓
+     Outbox Publisher          ← separate schedule, separate thread
+            ↓
+          Kafka
+            ↓
+  [Task 10: Notification Service]
+```
+
+**Task 09 has producers only.** Nothing consumes the topic yet — the observable
+result is a row on a Kafka topic. Task 10 introduces the Notification Service,
+the first real consumer.
+
+### Why an outbox, and not just a send
+
+The obvious implementation is to save the incident and then call Kafka. It has a
+failure everyone hits eventually: the two are separate systems, and a crash or a
+broker outage between them leaves the database saying one thing and the topic
+another. Worse, if the send is inside the transaction, a slow broker makes
+*monitoring* slow, and an unreachable broker can stop a monitor being marked
+`DOWN` at all.
+
+So the event is written as an ordinary row, in the same transaction as the
+incident:
+
+```text
+one MySQL transaction
+    ├── insert monitor_checks
+    ├── update monitors
+    ├── insert/update incidents
+    └── insert outbox_events
+              ↓
+           commit
+```
+
+Either both the incident and its event exist, or neither does. Delivery happens
+afterwards, on its own schedule. **`MonitorResultService` has no
+`KafkaTemplate`** — it cannot contact a broker even if it wanted to.
+
+### If Kafka is down
+
+Nothing stops:
+
+```text
+Kafka unavailable
+        ↓
+checks keep running, incidents keep opening and resolving
+        ↓
+outbox rows accumulate as pending
+        ↓
+broker returns
+        ↓
+publisher drains the backlog, oldest first
+```
+
+This was verified by stopping the broker mid-outage: six checks were recorded
+and an incident opened with no broker running, the event stayed pending with its
+attempt count and error recorded, and it published automatically once Kafka came
+back.
+
+### The topic
+
+```text
+pulseguard.incident-events.v1
+```
+
+The `.v1` is deliberate. An incompatible schema change gets a **new topic**
+rather than silently breaking every consumer of the old one, and both can run
+side by side while consumers migrate.
+
+Created by the application (a Spring `NewTopic` bean) rather than relying on the
+broker's `auto.create.topics.enable` — that is a broker-wide setting PulseGuard
+does not control, and a topic created implicitly gets whatever partition count
+the broker happens to default to. Locally: 3 partitions, replication factor 1.
+
+**The message key is the monitor id.** Everything about one monitor therefore
+lands on one partition and keeps its order, so a consumer can never see an
+outage resolved before it opened.
+
+### The events
+
+```text
+INCIDENT_OPENED     a monitor reached its failure threshold
+INCIDENT_RESOLVED   a successful check ended the outage
+```
+
+Individual checks are deliberately **not** published. A monitor on a 30-second
+interval produces thousands a day and almost none of them are news.
+
+Exactly one event per transition. Repeated failures during one outage publish
+nothing further, and pause and resume publish nothing at all — only a real
+successful check resolves an incident, so only that produces an event.
+
+```json
+{
+  "schemaVersion": 1,
+  "eventId": "20e04086-2497-4e77-a380-8437e2277bbd",
+  "eventType": "INCIDENT_OPENED",
+  "occurredAt": "2026-08-13T09:53:38.383566Z",
+
+  "incidentId": 3,
+  "projectId": 24,
+  "monitorId": 18,
+  "monitorName": "Kafka Demo",
+
+  "incidentOpenedAt": "2026-08-13T09:53:38.383566Z",
+  "incidentResolvedAt": null,
+
+  "triggeringCheckId": 163,
+  "monitorStatus": "DOWN",
+
+  "httpStatusCode": 200,
+  "responseTimeMs": 11,
+  "errorType": "UNEXPECTED_STATUS",
+  "errorMessage": "Expected HTTP 404 but received 200"
+}
+```
+
+`schemaVersion` travels **inside** the message, not only in the topic name, so a
+stored or forwarded event can still be read correctly.
+
+`occurredAt` is the incident's own timestamp, never the publishing time. An event
+that waited an hour in the outbox still describes an outage that began when it
+began.
+
+> **The monitor's URL is deliberately absent.** URLs carry query parameters,
+> tokens and internal hostnames, and an event bus is where data spreads. The
+> name and ids identify the monitor for anyone already entitled to look it up.
+> Credentials, tokens, headers and response bodies are never published.
+
+### Delivery semantics
+
+> **PulseGuard currently provides at-least-once Kafka event publication.**
+
+A consumer may see the same event more than once. The window is small and real:
+
+```text
+broker acknowledges the record
+        ↓
+worker crashes before publishedAt is committed
+        ↓
+the event is sent again after restart
+```
+
+Every event therefore carries a globally unique **`eventId`**, stable across
+republication, so a consumer can recognise a repeat and ignore it. Task 10's
+consumer will be responsible for that deduplication.
+
+Producer idempotence (`enable.idempotence=true`) is enabled, which stops the
+producer's *own* retries turning one record into several. It does **not** make
+the pipeline exactly-once — it says nothing about the window above. The two are
+different mechanisms for different failures, and neither claims more than it
+does.
+
+### Configuration
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `KAFKA_BOOTSTRAP_SERVERS` | `localhost:9092` | Broker addresses |
+| `KAFKA_INCIDENT_TOPIC` | `pulseguard.incident-events.v1` | Where events are published |
+| `KAFKA_INCIDENT_TOPIC_PARTITIONS` | `3` | Partitions when the topic is created |
+| `KAFKA_INCIDENT_TOPIC_REPLICATION` | `1` | Replicas when the topic is created |
+| `OUTBOX_PUBLISH_INTERVAL` | `PT5S` | How often to look for pending events |
+| `OUTBOX_BATCH_SIZE` | `50` | Most events sent in one cycle |
+| `KAFKA_SEND_TIMEOUT` | `PT10S` | How long to wait for a broker acknowledgement |
+
+Kafka is only in the **Monitor Worker**. The Control API owns the outbox
+migration but never reads the table, and the frontend knows nothing about any of
+it.
+
+### Running Kafka locally
+
+Kafka 4 needs no ZooKeeper. Any local broker on `localhost:9092` works:
+
+```bash
+# start
+kafka-server-start.sh -daemon <your-kafka>/config/server.properties
+
+# is it up?
+kafka-topics.sh --bootstrap-server localhost:9092 --list
+
+# watch the events, keys included
+kafka-console-consumer.sh --bootstrap-server localhost:9092 \
+  --topic pulseguard.incident-events.v1 --from-beginning \
+  --property print.key=true
+```
+
+The worker starts and monitors normally with no broker running, so Kafka is
+optional for everything except seeing the events.
 
 ---
 
@@ -869,7 +1070,6 @@ http://localhost:8081/api/v1/system/info
 Later stages will introduce, roughly in this order:
 
 ```text
-Kafka
 Notifications
 Docker
 SonarQube
@@ -879,4 +1079,4 @@ Kubernetes
 Observability
 ```
 
-The next stage is **Task 09 — Kafka Event Streaming**.
+The next stage is **Task 10 — Notification Service**.
