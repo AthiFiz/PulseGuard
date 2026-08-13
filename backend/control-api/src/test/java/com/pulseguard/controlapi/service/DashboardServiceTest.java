@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -13,11 +14,13 @@ import com.pulseguard.controlapi.domain.MonitorCheck;
 import com.pulseguard.controlapi.domain.Project;
 import com.pulseguard.controlapi.domain.User;
 import com.pulseguard.controlapi.dto.monitoring.ProjectDashboardResponse;
+import com.pulseguard.controlapi.enums.IncidentStatus;
 import com.pulseguard.controlapi.enums.MonitorCheckErrorType;
 import com.pulseguard.controlapi.enums.MonitorCheckOutcome;
 import com.pulseguard.controlapi.enums.MonitorStatus;
 import com.pulseguard.controlapi.exception.ApiErrorCode;
 import com.pulseguard.controlapi.exception.ApiException;
+import com.pulseguard.controlapi.repository.IncidentRepository;
 import com.pulseguard.controlapi.repository.MonitorCheckRepository;
 import com.pulseguard.controlapi.repository.MonitorRepository;
 import com.pulseguard.controlapi.repository.projection.MonitorStatusCountProjection;
@@ -51,6 +54,9 @@ class DashboardServiceTest {
     private MonitorCheckRepository monitorCheckRepository;
 
     @Mock
+    private IncidentRepository incidentRepository;
+
+    @Mock
     private ProjectAccessService projectAccessService;
 
     private DashboardServiceImpl dashboardService;
@@ -60,6 +66,7 @@ class DashboardServiceTest {
         dashboardService = new DashboardServiceImpl(
                 monitorRepository,
                 monitorCheckRepository,
+                incidentRepository,
                 projectAccessService,
                 Clock.fixed(NOW, ZoneOffset.UTC));
     }
@@ -237,6 +244,65 @@ class DashboardServiceTest {
         assertThat(dashboard.checks().uptimePercentage()).isNull();
     }
 
+    // ------------------------------------------------------- open incidents
+
+    @Test
+    void aProjectWithNoOpenIncidentsReportsZero() {
+        givenEmptyProject();
+
+        ProjectDashboardResponse dashboard = dashboardService.getProjectDashboard(PROJECT_ID, null, null);
+
+        assertThat(dashboard.openIncidents()).isZero();
+    }
+
+    @Test
+    void oneOngoingOutageIsCounted() {
+        givenAccessibleProject();
+        givenOpenIncidents(1);
+        givenStatusCounts(statusCount(MonitorStatus.UP, 4), statusCount(MonitorStatus.DOWN, 1));
+        givenCheckAggregate(100L, 90L, 120.0);
+        givenRecentFailures(List.of());
+
+        ProjectDashboardResponse dashboard = dashboardService.getProjectDashboard(PROJECT_ID, null, null);
+
+        assertThat(dashboard.openIncidents()).isEqualTo(1);
+    }
+
+    @Test
+    void severalOngoingOutagesAreCounted() {
+        givenAccessibleProject();
+        givenOpenIncidents(3);
+        givenStatusCounts(statusCount(MonitorStatus.DOWN, 3));
+        givenCheckAggregate(30L, 0L, null);
+        givenRecentFailures(List.of());
+
+        ProjectDashboardResponse dashboard = dashboardService.getProjectDashboard(PROJECT_ID, null, null);
+
+        assertThat(dashboard.openIncidents()).isEqualTo(3);
+    }
+
+    /**
+     * The count is current state, like the status counts. An outage that began
+     * before the window is still happening, and narrowing the window to the
+     * last hour must not make it disappear.
+     */
+    @Test
+    void theOpenIncidentCountIgnoresTheCheckHistoryWindow() {
+        givenAccessibleProject();
+        givenOpenIncidents(2);
+        givenStatusCounts(statusCount(MonitorStatus.DOWN, 2));
+        givenCheckAggregate(0L, 0L, null);
+        givenRecentFailures(List.of());
+
+        ProjectDashboardResponse narrow = dashboardService.getProjectDashboard(
+                PROJECT_ID, NOW.minus(Duration.ofMinutes(5)), NOW);
+
+        assertThat(narrow.openIncidents()).isEqualTo(2);
+        // Only the project and the status are used to count them; no date
+        // parameters are involved at all.
+        verify(incidentRepository).countByProjectAndStatus(PROJECT_ID, IncidentStatus.OPEN);
+    }
+
     // -------------------------------------------------------- recent failures
 
     @Test
@@ -296,12 +362,13 @@ class DashboardServiceTest {
                 .isEqualTo(ApiErrorCode.PROJECT_NOT_FOUND);
 
         verify(monitorRepository, never()).countByStatusForProject(any());
+        verify(incidentRepository, never()).countByProjectAndStatus(any(), any());
         verify(monitorCheckRepository, never()).aggregateForProject(any(), any(), any(), any());
     }
 
-    /** Three queries, no matter how many monitors the project holds. */
+    /** Four queries, no matter how many monitors the project holds. */
     @Test
-    void theDashboardCostsThreeQueriesRegardlessOfMonitorCount() {
+    void theDashboardCostsFourQueriesRegardlessOfMonitorCount() {
         givenAccessibleProject();
         givenStatusCounts(statusCount(MonitorStatus.UP, 500));
         givenCheckAggregate(500_000L, 499_000L, 120.0);
@@ -310,15 +377,25 @@ class DashboardServiceTest {
         dashboardService.getProjectDashboard(PROJECT_ID, null, null);
 
         verify(monitorRepository).countByStatusForProject(PROJECT_ID);
+        verify(incidentRepository).countByProjectAndStatus(PROJECT_ID, IncidentStatus.OPEN);
         verify(monitorCheckRepository).aggregateForProject(any(), any(), any(), any());
         verify(monitorCheckRepository).findRecentFailures(any(), any(), any(), any(), any());
+        // Adding incidents must not reintroduce a query per monitor.
         verify(monitorRepository, never()).findAllByProjectIdOrderByCreatedAtAsc(any());
+        verify(incidentRepository, never()).findProjectIncidents(any(), any(), any(), any(), any());
     }
 
     // ----------------------------------------------------------------- setup
 
     private void givenAccessibleProject() {
         when(projectAccessService.requireReadableProject(PROJECT_ID)).thenReturn(project());
+        givenOpenIncidents(0);
+    }
+
+    private void givenOpenIncidents(long count) {
+        lenient()
+                .when(incidentRepository.countByProjectAndStatus(PROJECT_ID, IncidentStatus.OPEN))
+                .thenReturn(count);
     }
 
     private void givenEmptyProject() {

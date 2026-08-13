@@ -84,6 +84,11 @@ export interface ProjectDashboard {
   generatedAt: string
   window: TimeWindow
   monitors: MonitorStatusCounts
+  /**
+   * Outages that have not ended yet, whenever they began. Current state like
+   * the monitor counts above, deliberately not filtered by `window`.
+   */
+  openIncidents: number
   checks: ProjectCheckStatistics
   recentFailures: RecentFailure[]
 }

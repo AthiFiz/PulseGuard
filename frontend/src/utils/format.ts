@@ -49,6 +49,40 @@ export function formatText(value: string | null | undefined): string {
 }
 
 /**
+ * How long an incident lasted, as presentation only.
+ *
+ * The backend deliberately stores no duration column: it is exactly
+ * `resolvedAt - openedAt`, and a second copy of a derived fact is a second
+ * thing that can disagree. An incident that is still open has no duration to
+ * show, because it has not ended.
+ */
+export function formatDuration(
+  from: string | null | undefined,
+  to: string | null | undefined,
+): string {
+  if (!from || !to) {
+    return EMPTY
+  }
+  const milliseconds = new Date(to).getTime() - new Date(from).getTime()
+  if (Number.isNaN(milliseconds) || milliseconds < 0) {
+    return EMPTY
+  }
+
+  const totalSeconds = Math.round(milliseconds / 1000)
+  const hours = Math.floor(totalSeconds / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  const seconds = totalSeconds % 60
+
+  if (hours > 0) {
+    return `${hours}h ${minutes}m`
+  }
+  if (minutes > 0) {
+    return `${minutes}m ${seconds}s`
+  }
+  return `${seconds}s`
+}
+
+/**
  * Converts a `datetime-local` input value into the ISO instant the API expects.
  *
  * The input gives local wall-clock time with no zone; `new Date` interprets it

@@ -10,14 +10,18 @@ recovers.
 
 ## Current Status
 
-**Stage 7 — Frontend MVP**
+**Stage 8 — Incident Management**
 
-Everything the API can do is now **usable from a browser**: register and sign in,
-create projects, invite members, configure monitors, and watch their status,
-statistics and check history update as the worker runs.
+PulseGuard now keeps a record of **outages**, not just checks. When a monitor
+reaches its failure threshold an incident opens; when the endpoint answers again
+it resolves. Repeated failures during one outage stay one incident.
 
-Still **not implemented**: incidents, Kafka, notifications. A monitor going
-`DOWN` turns red in the UI — but nobody is told.
+Everything is usable from a browser: register and sign in, create projects,
+invite members, configure monitors, watch status and history, and read the
+project's incident history.
+
+Still **not implemented**: Kafka and notifications. An incident opening is a row
+in the database and a red badge in the UI — nobody is told.
 
 All three applications share one MySQL database: the Control API owns the schema
 and the configuration, the worker executes the checks, and the frontend talks
@@ -109,6 +113,7 @@ V2__create_projects.sql
 V3__create_project_members.sql
 V4__create_monitors.sql
 V5__create_monitor_checks.sql
+V6__create_incidents.sql
 ```
 
 Never edit a migration that has already been applied — add a new one.
@@ -287,11 +292,13 @@ reports.
 /projects                  the projects you belong to, and project creation
 /projects/:id/dashboard    monitor counts, 24-hour check figures, recent failures
 /projects/:id/monitors     every monitor with its current status
+/projects/:id/incidents    outage history, filterable by status
 /projects/:id/members      members and their roles
 /projects/:id/settings     rename or delete the project        (PROJECT_ADMIN)
 /projects/:id/monitors/new create a monitor                    (PROJECT_ADMIN)
 /monitors/:id              status, configuration, statistics, check history
 /monitors/:id/edit         reconfigure a monitor               (PROJECT_ADMIN)
+/incidents/:id             one outage, read-only for every member
 ```
 
 ### Sessions
@@ -641,14 +648,21 @@ last March should not colour today's number. Pass `from` and `to` to override.
   "generatedAt": "2026-08-12T08:30:00Z",
   "window": { "from": "2026-08-11T08:30:00Z", "to": "2026-08-12T08:30:00Z" },
   "monitors": { "total": 10, "up": 7, "down": 1, "unknown": 1, "paused": 1 },
+  "openIncidents": 1,
   "checks": { "total": 1430, "successful": 1400, "failed": 30,
               "uptimePercentage": 97.90, "averageResponseTimeMs": 132.50 },
   "recentFailures": [ … ]
 }
 ```
 
-`monitors` is **current state and ignores the window** — changing the range does
-not change those counts. `checks` and `recentFailures` describe the window.
+`monitors` and `openIncidents` are **current state and ignore the window** —
+changing the range does not change those counts. `checks` and `recentFailures`
+describe the window.
+
+`openIncidents` is one aggregate query, not one per monitor, so the dashboard
+costs four queries whether the project has three monitors or five hundred. An
+outage that began last week is still open today, which is exactly why narrowing
+the window must not hide it.
 
 Project uptime is aggregated **across individual checks**, never by averaging
 each monitor's percentage. With a monitor on 1000 successful checks and another
@@ -661,8 +675,143 @@ still have failed twenty minutes ago.
 
 > **Uptime here is calculated from successful monitoring checks, not from
 > measured incident duration.** It is a descriptive figure, not an SLA
-> calculation. Duration-based availability needs incidents, which do not exist
-> yet.
+> calculation. Incidents now exist and record real outage durations, but nothing
+> uses them for availability yet — that is a deliberate later step.
+
+### Incidents
+
+An incident is **one continuous outage**, not one failed check. This is the
+whole idea, so it is worth stating plainly:
+
+```text
+failure threshold reached
+        ↓
+   Monitor DOWN
+        ↓
+  Incident OPEN
+```
+
+```text
+successful check
+        ↓
+    Monitor UP
+        ↓
+Incident RESOLVED
+```
+
+**Repeated failures during one outage do not create repeated incidents.** With
+`failureThreshold = 3`:
+
+```text
+Failure 1                      monitor stays UP        0 incidents
+Failure 2                      monitor stays UP        0 incidents
+Failure 3   → DOWN             incident #1 OPEN        1 incident
+Failure 4                      incident #1 OPEN        1 incident
+Failure 5                      incident #1 OPEN        1 incident
+Success     → UP               incident #1 RESOLVED    1 incident
+
+… later …
+
+Failures 1-3 → DOWN            incident #2 OPEN        2 incidents
+```
+
+Incident #1 stays `RESOLVED` forever. Rows are never reused, so the history is
+a real record of distinct outages.
+
+#### Monitor status is not an incident
+
+Two different questions, deliberately kept apart:
+
+| | Answers | Lives in | Changes |
+| --- | --- | --- | --- |
+| `MonitorStatus` | "is this endpoint healthy **right now**?" | `monitors.current_status` | overwritten on every check |
+| `Incident` | "what happened, and for how long?" | a row in `incidents` | never rewritten once resolved |
+
+A monitor showing `UP` today can sit in a project with dozens of `RESOLVED`
+incidents behind it. Neither contradicts the other.
+
+#### Statuses
+
+```text
+OPEN       the outage is still going: no successful check since it began
+RESOLVED   a successful check ended it
+```
+
+There is no `ACKNOWLEDGED`, no severity, no assignee and no comments. Those need
+a person acting on an incident, and PulseGuard offers nobody that yet.
+
+#### Pause and resume do not resolve anything
+
+Pausing a monitor stops PulseGuard checking it. That is not evidence the
+monitored service recovered, so:
+
+```text
+DOWN + open incident
+   ↓ pause          → PAUSED,  incident still OPEN
+   ↓ resume         → UNKNOWN, incident still OPEN
+   ↓ first success  → UP,      incident RESOLVED
+```
+
+Only a genuine successful check closes an incident. Note the third line: the
+monitor is `UNKNOWN` rather than `DOWN` when the success arrives, which is why
+resolution is tied to the success itself and not to the previous status.
+
+#### Endpoints
+
+```text
+GET /api/v1/projects/{projectId}/incidents   paginated history (any member)
+GET /api/v1/incidents/{incidentId}           one incident      (any member)
+```
+
+There is no `POST`, `PUT` or `DELETE`. Incidents are written by the Monitor
+Worker from observed checks; nothing a user types can take a service down or
+bring it back.
+
+```bash
+curl "http://localhost:8080/api/v1/projects/10/incidents?status=OPEN" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+| Parameter | Default | Notes |
+| --- | --- | --- |
+| `page` | `0` | Must not be negative |
+| `size` | `20` | Maximum `100`; a larger value is **rejected**, not clamped |
+| `status` | – | `OPEN` or `RESOLVED`; omitted returns both |
+| `from` | – | Inclusive ISO-8601 instant, filtering on `openedAt` |
+| `to` | – | Inclusive |
+
+Sorted **newest first** by `openedAt`, in the same `PageResponse` envelope as
+check history.
+
+```json
+{
+  "id": 41,
+  "projectId": 10,
+  "monitorId": 25,
+  "monitorName": "Payment API",
+  "status": "RESOLVED",
+  "openedAt": "2026-08-12T10:10:00Z",
+  "resolvedAt": "2026-08-12T10:18:00Z",
+  "openingCheckId": 1501,
+  "resolutionCheckId": 1517
+}
+```
+
+An `OPEN` incident reports `"resolvedAt": null` and
+`"resolutionCheckId": null`. Nothing invents an end time for an outage that has
+not ended.
+
+Both timestamps are **check timestamps, not row-insert times**, so the duration
+between them describes the monitored service rather than the worker. There is no
+`duration` field: it is exactly `resolvedAt - openedAt`, and storing a derived
+value is one more thing that can disagree with the facts it came from.
+
+`openingCheckId` and `resolutionCheckId` point at the rows in `monitor_checks`
+that caused each transition — the raw evidence behind the two timestamps.
+
+Access is inherited from the monitor's project. A non-member asking for an
+incident gets `404 INCIDENT_NOT_FOUND`, identical to a genuinely missing one, so
+ids reveal nothing about other people's outages.
 
 ### Roles
 
@@ -720,7 +869,6 @@ http://localhost:8081/api/v1/system/info
 Later stages will introduce, roughly in this order:
 
 ```text
-Incident Management
 Kafka
 Notifications
 Docker
@@ -731,4 +879,4 @@ Kubernetes
 Observability
 ```
 
-The next stage is **Task 08 — Incident Management**.
+The next stage is **Task 09 — Kafka Event Streaming**.

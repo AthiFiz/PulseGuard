@@ -129,6 +129,10 @@ a { color: var(--accent); }
 .stat--down .stat__value { color: var(--down); }
 .stat--unknown .stat__value { color: var(--ink-soft); }
 .stat--paused .stat__value { color: var(--warn); }
+/* A stat card that navigates somewhere should look like it does. */
+.stat--link { text-decoration: none; color: inherit; transition: border-color 0.12s ease; }
+.stat--link:hover { border-color: var(--accent); }
+.stat--link .stat__label { text-decoration: underline; text-underline-offset: 2px; }
 
 .detail-grid {
   display: grid; gap: 0.85rem 1.5rem;
@@ -149,6 +153,15 @@ a { color: var(--accent); }
 .badge--down { color: var(--down); background: var(--down-dim); }
 .badge--unknown { color: var(--ink-soft); background: var(--surface-2); }
 .badge--paused { color: var(--warn); background: var(--warn-dim); }
+
+/* Incident status. Outlined rather than filled, so an OPEN incident is never
+   mistaken for a DOWN monitor at a glance — they are different statements. */
+.badge--incident-open {
+  color: var(--down); background: transparent; border: 1px solid var(--down);
+}
+.badge--incident-resolved {
+  color: var(--up); background: transparent; border: 1px solid var(--up);
+}
 
 .tag {
   display: inline-block; margin-left: 0.4rem; padding: 0.05rem 0.45rem;

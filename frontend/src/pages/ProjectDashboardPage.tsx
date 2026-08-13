@@ -37,7 +37,7 @@ export function ProjectDashboardPage() {
     return <ErrorState message={error ?? 'No dashboard data.'} onRetry={() => void load()} />
   }
 
-  const { monitors, checks, window, recentFailures } = dashboard
+  const { monitors, checks, window, recentFailures, openIncidents } = dashboard
 
   return (
     <div className="dashboard">
@@ -63,6 +63,15 @@ export function ProjectDashboardPage() {
         <StatCard label="Down" value={formatNumber(monitors.down)} tone="down" />
         <StatCard label="Unknown" value={formatNumber(monitors.unknown)} tone="unknown" />
         <StatCard label="Paused" value={formatNumber(monitors.paused)} tone="paused" />
+        {/* Counted by the backend, never by fetching every incident and
+            counting them here. An outage that started before the window is
+            still an outage, so this ignores the window entirely. */}
+        <StatCard
+          label="Open incidents"
+          value={formatNumber(openIncidents)}
+          tone={openIncidents > 0 ? 'down' : undefined}
+          to={`/projects/${project.id}/incidents?status=OPEN`}
+        />
       </div>
 
       <div className="stat-grid">
@@ -120,13 +129,27 @@ function StatCard({
   label,
   value,
   tone,
+  to,
 }: {
   label: string
   value: string
   tone?: 'up' | 'down' | 'unknown' | 'paused'
+  /** When given, the whole card becomes the link to the detail behind it. */
+  to?: string
 }) {
+  const className = tone ? `stat stat--${tone}` : 'stat'
+
+  if (to) {
+    return (
+      <Link to={to} className={`${className} stat--link`}>
+        <span className="stat__label">{label}</span>
+        <span className="stat__value">{value}</span>
+      </Link>
+    )
+  }
+
   return (
-    <div className={tone ? `stat stat--${tone}` : 'stat'}>
+    <div className={className}>
       <span className="stat__label">{label}</span>
       <span className="stat__value">{value}</span>
     </div>

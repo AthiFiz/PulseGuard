@@ -100,6 +100,7 @@ describe('ProjectDashboardPage', () => {
     generatedAt: '2026-08-12T08:30:00Z',
     window: { from: '2026-08-11T08:30:00Z', to: '2026-08-12T08:30:00Z' },
     monitors: { total: 10, up: 7, down: 1, unknown: 1, paused: 1 },
+    openIncidents: 1,
     checks: {
       total: 1430,
       successful: 1400,
@@ -137,6 +138,39 @@ describe('ProjectDashboardPage', () => {
   })
 
   /**
+   * The count comes from the dashboard response. Fetching every incident and
+   * counting them in the browser would be a second, slower source of truth.
+   */
+  it('shows the open incident count from the dashboard response', async () => {
+    const fetchMock = routeFetch([
+      [/\/auth\/me$/, ADMIN_USER],
+      [/\/projects\/10$/, PROJECT],
+      [/\/projects\/10\/members$/, [member(1, 'PROJECT_ADMIN')]],
+      [/\/projects\/10\/dashboard/, DASHBOARD],
+    ])
+
+    renderProjectRoute(<ProjectDashboardPage />, '/projects/10/dashboard', 'dashboard')
+
+    expect(await screen.findByText('Open incidents')).toBeTruthy()
+    const urls = fetchMock.mock.calls.map((call) => String(call[0]))
+    expect(urls.some((url) => url.includes('/incidents'))).toBe(false)
+  })
+
+  it('links the open incident count to the filtered incident list', async () => {
+    routeFetch([
+      [/\/auth\/me$/, ADMIN_USER],
+      [/\/projects\/10$/, PROJECT],
+      [/\/projects\/10\/members$/, [member(1, 'PROJECT_ADMIN')]],
+      [/\/projects\/10\/dashboard/, DASHBOARD],
+    ])
+
+    renderProjectRoute(<ProjectDashboardPage />, '/projects/10/dashboard', 'dashboard')
+
+    const link = await screen.findByRole('link', { name: /Open incidents/ })
+    expect(link.getAttribute('href')).toBe('/projects/10/incidents?status=OPEN')
+  })
+
+  /**
    * No checks means unknown availability, not zero. Rendering 0% would claim an
    * outage that never happened.
    */
@@ -150,6 +184,7 @@ describe('ProjectDashboardPage', () => {
         {
           ...DASHBOARD,
           monitors: { total: 2, up: 0, down: 0, unknown: 2, paused: 0 },
+          openIncidents: 0,
           checks: {
             total: 0,
             successful: 0,

@@ -27,8 +27,6 @@ import org.springframework.transaction.annotation.Transactional;
 @RequiredArgsConstructor
 public class MonitoringQueryServiceImpl implements MonitoringQueryService {
 
-    static final int MAX_PAGE_SIZE = 100;
-
     private final MonitorCheckRepository monitorCheckRepository;
     private final MonitorAccessService monitorAccessService;
 
@@ -41,7 +39,7 @@ public class MonitoringQueryServiceImpl implements MonitoringQueryService {
         // Access first: an inaccessible monitor must look missing, not empty.
         Monitor monitor = monitorAccessService.requireReadableMonitor(monitorId);
 
-        validatePagination(page, size);
+        QueryPagination.validate(page, size);
 
         // Sorting is fixed rather than caller-supplied. Newest-first is what a
         // history view wants, and an arbitrary sort column would invite queries
@@ -82,24 +80,5 @@ public class MonitoringQueryServiceImpl implements MonitoringQueryService {
                 stats.getMaximumResponseTimeMs(),
                 stats.getLastCheckedAt(),
                 monitor.getCurrentStatus());
-    }
-
-    /**
-     * Page numbers and sizes are rejected rather than clamped.
-     *
-     * <p>Silently turning {@code size=100000} into 100 would leave a client
-     * convinced it had received everything.
-     */
-    private static void validatePagination(int page, int size) {
-        if (page < 0) {
-            throw ApiException.monitoringQueryInvalid("'page' must not be negative");
-        }
-        if (size < 1) {
-            throw ApiException.monitoringQueryInvalid("'size' must be at least 1");
-        }
-        if (size > MAX_PAGE_SIZE) {
-            throw ApiException.monitoringQueryInvalid(
-                    "'size' must not exceed %d".formatted(MAX_PAGE_SIZE));
-        }
     }
 }

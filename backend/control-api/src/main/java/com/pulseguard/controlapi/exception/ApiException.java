@@ -65,6 +65,15 @@ public class ApiException extends RuntimeException {
         return new ApiException(ApiErrorCode.MONITOR_NOT_FOUND, "Monitor not found");
     }
 
+    /**
+     * Used both when an incident genuinely does not exist and when the caller
+     * has no access to the project behind it, so incident ids reveal nothing
+     * about other people's outages.
+     */
+    public static ApiException incidentNotFound() {
+        return new ApiException(ApiErrorCode.INCIDENT_NOT_FOUND, "Incident not found");
+    }
+
     /** A configuration rule that Bean Validation annotations cannot express. */
     public static ApiException monitorValidation(String message) {
         return new ApiException(ApiErrorCode.MONITOR_VALIDATION_ERROR, message);

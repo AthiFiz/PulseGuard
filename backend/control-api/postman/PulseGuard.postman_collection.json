@@ -59,6 +59,10 @@
       "key": "monitorId",
       "value": "",
       "type": "string"
+    },
+    {
+      "key": "incidentId",
+      "value": ""
     }
   ],
   "item": [
@@ -3846,7 +3850,8 @@
                   "pm.test(\"defaults to a 24 hour window\", function () { var w = pm.response.json().window; var hours = (new Date(w.to) - new Date(w.from)) / 3600000; pm.expect(Math.round(hours)).to.eql(24); });",
                   "pm.test(\"check counts add up\", function () { var c = pm.response.json().checks; pm.expect(c.successful + c.failed).to.eql(c.total); });",
                   "pm.test(\"at most ten recent failures\", function () { pm.expect(pm.response.json().recentFailures.length).to.be.at.most(10); });",
-                  "pm.test(\"no incident metrics \u2014 they do not exist yet\", function () { var d = pm.response.json(); pm.expect(d).to.not.have.property(\"activeIncidents\"); pm.expect(d).to.not.have.property(\"incidentCount\"); });"
+                  "pm.test(\"no incident metrics \u2014 they do not exist yet\", function () { var d = pm.response.json(); pm.expect(d).to.not.have.property(\"activeIncidents\"); pm.expect(d).to.not.have.property(\"incidentCount\"); });",
+                  "pm.test(\"reports the current open incident count\", function () { var d = pm.response.json(); pm.expect(d.openIncidents).to.be.a(\"number\"); pm.expect(d.openIncidents).to.be.at.least(0); });"
                 ]
               }
             }
@@ -3884,7 +3889,8 @@
                 "type": "text/javascript",
                 "exec": [
                   "pm.test(\"status is 200\", function () { pm.response.to.have.status(200); });",
-                  "pm.test(\"uses the window it was given\", function () { pm.expect(pm.response.json().window.from).to.include(\"2020-01-01\"); });"
+                  "pm.test(\"uses the window it was given\", function () { pm.expect(pm.response.json().window.from).to.include(\"2020-01-01\"); });",
+                  "pm.test(\"reports the current open incident count\", function () { var d = pm.response.json(); pm.expect(d.openIncidents).to.be.a(\"number\"); pm.expect(d.openIncidents).to.be.at.least(0); });"
                 ]
               }
             }
@@ -3923,6 +3929,405 @@
                 "exec": [
                   "pm.test(\"status is 404\", function () { pm.response.to.have.status(404); });",
                   "pm.test(\"error code is PROJECT_NOT_FOUND\", function () { pm.expect(pm.response.json().code).to.eql(\"PROJECT_NOT_FOUND\"); });"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "7d \u00b7 Incidents",
+      "description": "Incident history. An incident is one continuous outage, not one failed check, and it is opened and resolved by the Monitor Worker \u2014 there is no POST, PUT or DELETE here on purpose.\n\nThese requests need the Monitor Worker to have actually taken a monitor down and brought it back. With no outages yet the lists are legitimately empty, and the assertions below still pass.",
+      "item": [
+        {
+          "name": "List project incidents",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{viewerToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/projects/{{projectId}}/incidents",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "projects",
+                "{{projectId}}",
+                "incidents"
+              ]
+            },
+            "description": "Any project member may read. Paginated, newest first, defaults to page 0 size 20."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", function () { pm.response.to.have.status(200); });",
+                  "pm.test(\"returns a page envelope, not a raw Spring Page\", function () { var d = pm.response.json(); pm.expect(d).to.have.all.keys(\"content\",\"page\",\"size\",\"totalElements\",\"totalPages\",\"first\",\"last\"); });",
+                  "pm.test(\"defaults to the first page of 20\", function () { var d = pm.response.json(); pm.expect(d.page).to.eql(0); pm.expect(d.size).to.eql(20); });",
+                  "pm.test(\"newest first\", function () { var c = pm.response.json().content; for (var i = 1; i < c.length; i++) { pm.expect(new Date(c[i-1].openedAt).getTime()).to.be.at.least(new Date(c[i].openedAt).getTime()); } });",
+                  "pm.test(\"every incident names its monitor\", function () { pm.response.json().content.forEach(function (i) { pm.expect(i).to.have.property(\"monitorName\"); pm.expect(i.monitorId).to.be.a(\"number\"); }); });",
+                  "var c = pm.response.json().content;",
+                  "if (c.length > 0) { pm.collectionVariables.set(\"incidentId\", c[0].id); }"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List OPEN incidents",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{viewerToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/projects/{{projectId}}/incidents?status=OPEN",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "projects",
+                "{{projectId}}",
+                "incidents"
+              ],
+              "query": [
+                {
+                  "key": "status",
+                  "value": "OPEN"
+                }
+              ]
+            },
+            "description": "Ongoing outages only. This is what the dashboard's Open incidents card links to."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", function () { pm.response.to.have.status(200); });",
+                  "pm.test(\"only OPEN comes back\", function () { pm.response.json().content.forEach(function (i) { pm.expect(i.status).to.eql(\"OPEN\"); }); });",
+                  "pm.test(\"an open incident has no resolution\", function () { pm.response.json().content.forEach(function (i) { pm.expect(i.resolvedAt).to.eql(null); pm.expect(i.resolutionCheckId).to.eql(null); }); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List RESOLVED incidents",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{viewerToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/projects/{{projectId}}/incidents?status=RESOLVED",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "projects",
+                "{{projectId}}",
+                "incidents"
+              ],
+              "query": [
+                {
+                  "key": "status",
+                  "value": "RESOLVED"
+                }
+              ]
+            },
+            "description": "Past outages. Each one must carry both timestamps."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", function () { pm.response.to.have.status(200); });",
+                  "pm.test(\"only RESOLVED comes back\", function () { pm.response.json().content.forEach(function (i) { pm.expect(i.status).to.eql(\"RESOLVED\"); }); });",
+                  "pm.test(\"a resolved incident ended after it began\", function () { pm.response.json().content.forEach(function (i) { pm.expect(i.resolvedAt).to.not.eql(null); pm.expect(new Date(i.resolvedAt).getTime()).to.be.at.least(new Date(i.openedAt).getTime()); }); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List incidents \u00b7 pagination and date range",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ownerToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/projects/{{projectId}}/incidents?page=0&size=5&from=2020-01-01T00:00:00Z",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "projects",
+                "{{projectId}}",
+                "incidents"
+              ],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "0"
+                },
+                {
+                  "key": "size",
+                  "value": "5"
+                },
+                {
+                  "key": "from",
+                  "value": "2020-01-01T00:00:00Z"
+                }
+              ]
+            },
+            "description": "from/to filter on openedAt, using the same time-window rules as check history."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 200\", function () { pm.response.to.have.status(200); });",
+                  "pm.test(\"the requested page size is honoured\", function () { pm.expect(pm.response.json().size).to.eql(5); });",
+                  "pm.test(\"nothing older than the range\", function () { var from = new Date(\"2020-01-01T00:00:00Z\").getTime(); pm.response.json().content.forEach(function (i) { pm.expect(new Date(i.openedAt).getTime()).to.be.at.least(from); }); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List incidents \u00b7 size above the maximum is rejected",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ownerToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/projects/{{projectId}}/incidents?size=101",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "projects",
+                "{{projectId}}",
+                "incidents"
+              ],
+              "query": [
+                {
+                  "key": "size",
+                  "value": "101"
+                }
+              ]
+            },
+            "description": "Rejected rather than clamped, so a client is never left believing it received everything."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 400\", function () { pm.response.to.have.status(400); });",
+                  "pm.test(\"code is MONITORING_QUERY_INVALID\", function () { pm.expect(pm.response.json().code).to.eql(\"MONITORING_QUERY_INVALID\"); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get incident",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{viewerToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/incidents/{{incidentId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "incidents",
+                "{{incidentId}}"
+              ]
+            },
+            "description": "One incident by its own id. Skipped automatically when no outage has happened yet."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (!pm.collectionVariables.get(\"incidentId\")) { pm.test.skip(\"no incident recorded yet\", function () {}); } else {",
+                  "  pm.test(\"status is 200\", function () { pm.response.to.have.status(200); });",
+                  "  pm.test(\"carries its monitor and project\", function () { var d = pm.response.json(); pm.expect(d.monitorId).to.be.a(\"number\"); pm.expect(d.monitorName).to.be.a(\"string\"); pm.expect(d.projectId).to.be.a(\"number\"); });",
+                  "  pm.test(\"status is OPEN or RESOLVED\", function () { pm.expect([\"OPEN\",\"RESOLVED\"]).to.include(pm.response.json().status); });",
+                  "  pm.test(\"openedAt is always present\", function () { pm.expect(pm.response.json().openedAt).to.not.eql(null); });",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Incident \u00b7 non-member is refused",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{viewerToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/projects/{{otherProjectId}}/incidents",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "projects",
+                "{{otherProjectId}}",
+                "incidents"
+              ]
+            },
+            "description": "Access is inherited from the monitor's project. A non-member sees 404, never 403."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 404\", function () { pm.response.to.have.status(404); });",
+                  "pm.test(\"code is PROJECT_NOT_FOUND\", function () { pm.expect(pm.response.json().code).to.eql(\"PROJECT_NOT_FOUND\"); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Incident \u00b7 unknown id",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ownerToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/incidents/999999",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "incidents",
+                "999999"
+              ]
+            },
+            "description": "Identical to the response a non-member gets, so incident ids reveal nothing."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 404\", function () { pm.response.to.have.status(404); });",
+                  "pm.test(\"code is INCIDENT_NOT_FOUND\", function () { pm.expect(pm.response.json().code).to.eql(\"INCIDENT_NOT_FOUND\"); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Incidents are system-generated \u00b7 POST is refused",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ownerToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/projects/{{projectId}}/incidents",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "projects",
+                "{{projectId}}",
+                "incidents"
+              ]
+            },
+            "description": "There is no way to declare an outage by hand. Only an observed check can open one."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status is 405\", function () { pm.response.to.have.status(405); });",
+                  "pm.test(\"code is METHOD_NOT_ALLOWED\", function () { pm.expect(pm.response.json().code).to.eql(\"METHOD_NOT_ALLOWED\"); });"
                 ]
               }
             }

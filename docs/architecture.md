@@ -1,7 +1,7 @@
 # PulseGuard Architecture
 
-This document describes the architecture as it stands at **Stage 7 — Frontend
-MVP**, and the shape it is intended to grow into.
+This document describes the architecture as it stands at **Stage 8 — Incident
+Management**, and the shape it is intended to grow into.
 
 Anything marked **[NOT YET IMPLEMENTED]** does not exist in the codebase.
 
@@ -61,10 +61,14 @@ Implemented today:
 - **project management**: project CRUD plus membership and role management
 - **monitor configuration**: monitor CRUD, pause and resume
 - **monitoring reads**: check history, monitor statistics, project dashboard
+- **incident reads**: project incident history and incident detail
+
+It **never writes an incident.** Opening and resolving one is a statement about
+what a check observed, so only the worker may make it.
 
 Future responsibilities **[NOT YET IMPLEMENTED]**:
 
-- incident APIs
+- incident acknowledgement and assignment
 
 ### Monitor Worker
 
@@ -79,11 +83,13 @@ Implemented today:
 - **measuring response time**
 - **persisting every check** to `monitor_checks`
 - **updating monitor state**: consecutive failures, and UP/DOWN transitions
+- **opening and resolving incidents** from those transitions
 
 It connects to the same MySQL database as the Control API but maps only
-`monitors` and `monitor_checks`, with `project_id` and `monitor_id` as plain
-`Long` columns rather than JPA associations — the worker performs no project
-authorization, so the whole project-management model would be dead weight.
+`monitors`, `monitor_checks` and `incidents`, with `project_id`, `monitor_id`
+and the check references as plain `Long` columns rather than JPA associations —
+the worker performs no project authorization, so the whole project-management
+model would be dead weight.
 
 **It runs no migrations.** Flyway lives entirely in the Control API; the worker
 uses `ddl-auto=validate` and would fail to start if the schema did not match
@@ -91,7 +97,6 @@ what it expects.
 
 Future responsibilities **[NOT YET IMPLEMENTED]**:
 
-- opening and resolving incidents
 - publishing events to Kafka
 - coordinating multiple worker replicas
 
@@ -206,7 +211,8 @@ HealthCheckResult                outcome, status, duration, error type
         ▼
 MonitorResultService             ONE short transaction:
         │                          insert monitor_checks
-        ▼                          update monitors state + schedule
+        │                          update monitors state + schedule
+        ▼                          open or resolve the incident
 ```
 
 **No database transaction is ever held open across the HTTP call.** The due
@@ -214,6 +220,10 @@ query finishes and detaches its rows, the request happens with nothing open, and
 the result is written in its own short transaction afterwards. A monitored
 endpoint that takes 30 seconds to answer therefore cannot pin a database
 connection for 30 seconds.
+
+The check row, the monitor's new state and the incident change are written in
+**that same short transaction**, so a monitor can never be committed as `DOWN`
+without the incident that explains it.
 
 Monitors are processed **sequentially**, and one failing monitor is caught and
 logged so the rest of the cycle continues. A failure of the polling query itself
@@ -239,12 +249,77 @@ interval is still checked once a minute.
 | Monitor deleted mid-request | The result is discarded; inserting the check would violate the foreign key |
 | Configuration changed mid-request | The result reflects the configuration at request time; the schedule is recalculated from the freshly re-read monitor |
 
+### The incident lifecycle
+
+An incident represents **one continuous outage**, not one failed check.
+
+```text
+      UNKNOWN / UP
+            │
+   consecutive failures reach
+     the failure threshold
+            │
+            ▼
+          DOWN ──────────► open an incident   (exactly one)
+            │
+            │  further failures: the same incident stays open,
+            │  no second row is ever written
+            │
+     a successful check
+            │
+            ▼
+           UP  ──────────► resolve that incident
+```
+
+A later outage opens a **new** incident. Resolved rows are never reopened or
+reused, so the table is a record of distinct episodes rather than a mutable
+status field.
+
+Three rules are worth stating explicitly, because each one is a decision rather
+than an accident:
+
+| Rule | Why |
+| --- | --- |
+| Resolution follows a **successful check**, not a `DOWN → UP` transition | Pause and resume leave the monitor `UNKNOWN`, yet the outage it recorded is still the truth until something answers |
+| **Pausing does not resolve** an incident | Choosing to stop looking is not evidence that the service recovered |
+| **Resuming does not resolve** an incident | Resume only reschedules; it observes nothing |
+
+So the full pause path is:
+
+```text
+DOWN + open incident
+   │ pause          → PAUSED,  incident OPEN
+   │ resume         → UNKNOWN, incident OPEN
+   │ first success  → UP,      incident RESOLVED
+```
+
+An in-flight result that arrives after a pause is stored as a check but changes
+neither the monitor's state nor its incident.
+
+`openedAt` and `resolvedAt` are copied from the **checks' own timestamps**, not
+from the clock at insert time, so the duration between them describes the
+monitored service rather than the worker's scheduling.
+
+If a monitor is somehow `DOWN` with no open incident — data from an interrupted
+run, or an older environment — the next failed check opens one defensively and
+logs a warning. That is a repair path, not a normal one.
+
 ### Not implemented at this stage
 
-No incidents, no Kafka events, no notifications, and **no distributed locking**.
-Exactly one worker instance is assumed — two workers against the same database
-would both see the same due monitors and check everything twice. Coordination
-(`SELECT … FOR UPDATE SKIP LOCKED`) belongs to the Kubernetes scaling stage.
+**No Kafka events and no notifications.** An incident opening is recorded in the
+database and shown in the UI; nobody is told. Event publishing arrives in the
+Kafka stage, and email in the notification stage.
+
+There is no acknowledgement, assignment, severity or comment thread — all of
+those need a person acting on an incident, which the product does not yet offer.
+
+**No distributed locking.** Exactly one worker instance is assumed — two workers
+against the same database would both see the same due monitors and check
+everything twice. The "at most one open incident per monitor" rule is enforced by
+that single writer plus an application-level check, **not** by a database
+constraint; a second worker could race two open incidents into existence.
+Coordination (`SELECT … FOR UPDATE SKIP LOCKED`) belongs to the Kubernetes
+scaling stage, and Task 08 does not pretend to solve it.
 
 ---
 
@@ -587,7 +662,21 @@ project_members   user/project membership; unique (project_id, user_id)
 monitors          monitored endpoints, their configuration and current state
 monitor_checks    the result of each individual check; written by the worker,
                   read by the Control API's reporting endpoints
+incidents         one row per continuous outage; written by the worker,
+                  read by the Control API. monitor_id CASCADEs, and the two
+                  check references are SET NULL so losing a check cannot
+                  block a delete or erase the outage record
 ```
+
+`incidents` also carries a CHECK constraint tying status to resolution: an
+`OPEN` row must have no `resolved_at`, and a `RESOLVED` row must have one. The
+database refuses a half-finished incident even if application code ever tried to
+write one.
+
+Deleting a monitor removes its checks **and its incidents** through those
+cascades; deleting a project removes its monitors and everything below them.
+That is a deliberate trade: outage history is scoped to the monitor it describes,
+and PulseGuard has no soft delete.
 
 All tables are InnoDB / utf8mb4, use `snake_case` naming, and use
 `BIGINT AUTO_INCREMENT` primary keys. Timestamps are `DATETIME(6)` and are
@@ -636,7 +725,35 @@ Stated here so they are not mistaken for oversights.
 
 ---
 
-## Technology Notes (Stage 7)
+## Known limitations of incident management
+
+Stated here so they are not mistaken for oversights.
+
+- **One worker only.** The one-open-incident-per-monitor rule is enforced by
+  application logic in a single writer, not by a unique constraint. Two workers
+  could open two incidents for the same outage. Hardening this belongs with
+  multi-worker coordination.
+- **No events, no notifications.** An incident opens and nobody is told. The
+  observable result is a database row and a screen.
+- **No acknowledgement, assignment, severity or comments.** All of them need a
+  person acting on an incident; the product offers no such action yet.
+- **No manual create or resolve.** Deliberate: an incident asserts something
+  about the monitored service, and only a check can observe that.
+- **Uptime still comes from check counts,** not incident durations. The
+  durations are now recorded and correct, but nothing uses them for availability
+  yet.
+- **Deleting a monitor deletes its incident history**, through the same cascade
+  that already removed its checks.
+- **The UI does not update on its own.** An incident opening appears on the next
+  navigation or *Refresh*, like every other screen.
+- **No automated database tests.** The lifecycle is covered by fast interaction
+  tests with mocked repositories, which prove the service asks for the right
+  things — not that the transaction commits atomically. That needs a real
+  database and is deferred with the rest of the integration-test scope.
+
+---
+
+## Technology Notes (Stage 8)
 
 | Area           | Choice                                                          |
 | -------------- | --------------------------------------------------------------- |
@@ -652,6 +769,7 @@ Stated here so they are not mistaken for oversights.
 | Styling        | one hand-written stylesheet — no CSS framework                   |
 | Frontend HTTP  | the browser `fetch` API — no HTTP client library                 |
 | Frontend tests | Vitest + React Testing Library, jsdom                            |
+| Incidents      | worker-written rows; Control API reads only                      |
 
 The frontend deliberately carries no state-management, styling, charting or HTTP
 library. At this size each would add a dependency and a set of conventions

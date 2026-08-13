@@ -103,6 +103,11 @@ export function ProjectLayout() {
           <NavLink to={`/projects/${project.id}/monitors`} className={tabClass} end>
             Monitors
           </NavLink>
+          {/* Visible to every member, viewers included: incidents are read-only
+              for everyone, so there is no role to check here. */}
+          <NavLink to={`/projects/${project.id}/incidents`} className={tabClass}>
+            Incidents
+          </NavLink>
           <NavLink to={`/projects/${project.id}/members`} className={tabClass}>
             Members
           </NavLink>
