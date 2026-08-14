@@ -514,6 +514,64 @@ recorded in **[docs/testing-hardening.md](docs/testing-hardening.md)**, along
 with the security findings, the reliability failure model, and development
 performance observations.
 
+### Coverage
+
+Coverage is opt-in and does not affect the normal build:
+
+```bash
+./mvnw clean verify -Pcoverage   # backend — writes target/site/jacoco/jacoco.xml
+npm run test:coverage            # frontend — writes coverage/lcov.info
+```
+
+---
+
+## SonarQube
+
+An **informational** quality dashboard: bugs, vulnerabilities, security
+hotspots, code smells, duplication and unit-test coverage for the three backend
+applications. It blocks nothing — there is no coverage threshold and no custom
+Quality Gate, deliberately.
+
+```bash
+# 1. Start it (optional profile — `docker compose up -d` does not start it)
+docker compose --profile quality up -d sonarqube
+```
+
+It takes a few minutes to become healthy; watch `docker compose ps` for
+`(healthy)` rather than just `Up`. Then open **<http://localhost:9000>**.
+
+```bash
+# 2. Log in as admin/admin, set your own password, and generate a token:
+#      My Account -> Security -> Generate Tokens -> Global Analysis Token
+export SONAR_TOKEN=<the token>
+export SONAR_HOST_URL=http://localhost:9000   # optional, this is the default
+
+# 3. Generate coverage and scan the three backends
+./scripts/sonar-local.sh
+```
+
+Three projects appear: **PulseGuard Control API**, **Monitor Worker** and
+**Notification Service**.
+
+The **frontend is not analysed by SonarQube** — its JavaScript analyzer rejects
+the Node version this project is pinned to, and upgrading Node to satisfy a
+reporting tool was out of scope. Frontend *coverage* still works
+(`npm run test:coverage`); only the SonarQube upload is skipped. The reasoning
+and the one-line path to enabling it later are in
+[docs/sonarqube.md](docs/sonarqube.md#the-frontend-is-not-analysed-by-sonarqube).
+
+The token is a credential and is read from your environment — it is not in any
+tracked file, and neither is the admin password.
+
+> SonarQube is a development tool, like Kafka UI. No PulseGuard service depends
+> on it, and `./mvnw clean verify` never contacts it. It is also heavy: on a
+> constrained laptop, `docker compose stop kafka-ui` before starting it, and
+> note you do not need the PulseGuard stack running at all to analyse the code.
+
+Full details — token setup, coverage exclusions and why they are what they are,
+reading the dashboard, resetting only SonarQube's volumes — are in
+**[docs/sonarqube.md](docs/sonarqube.md)**.
+
 ---
 
 ## Building the Frontend

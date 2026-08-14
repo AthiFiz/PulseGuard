@@ -9,6 +9,14 @@ dist/
 .vite/
 *.tsbuildinfo
 
+# --- Quality tooling output (Task 13) ---
+# Coverage reports and the Sonar scanner's working directory are generated on
+# demand and are never committed. The configuration that produces them
+# (sonar-project.properties, the Maven coverage profile) is tracked.
+coverage/
+.scannerwork/
+.sonar/
+
 # --- Environment files ---
 .env
 .env.local

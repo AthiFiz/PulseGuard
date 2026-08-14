@@ -354,6 +354,69 @@ services:
         condition: service_healthy
 
   # =========================================================================
+  # Optional: code quality  (--profile quality)
+  # =========================================================================
+
+  sonarqube:
+    # Static analysis and coverage for the four PulseGuard applications.
+    #
+    # Nothing in PulseGuard depends on this, and nothing should: no service
+    # lists it in depends_on, and SonarQube being down or absent has zero
+    # effect on the running stack. It is a development tool that reads the
+    # source tree, not part of the architecture.
+    #
+    # It is also heavy — an Elasticsearch instance lives inside it. On a
+    # constrained laptop, stop kafka-ui before starting this.
+    image: sonarqube:26.8.0.126808-community
+    profiles: ["quality"]
+    environment:
+      # The container's Elasticsearch refuses to start under Docker's default
+      # limits without this. Acceptable for a local evaluation instance; a
+      # deployed SonarQube would raise the host limits instead.
+      SONAR_ES_BOOTSTRAP_CHECKS_DISABLE: "true"
+    ports:
+      - "127.0.0.1:${SONARQUBE_PORT:-9000}:9000"
+    volumes:
+      # Analysis history lives in sonarqube_data, alongside the embedded
+      # database. Surviving `docker compose down` is the point — losing the
+      # baseline on every restart would make the numbers useless.
+      #
+      # NOTE: `docker compose down -v` deletes these together with the
+      # PulseGuard MySQL and Kafka volumes. To reset only SonarQube, remove
+      # its volumes by name instead — see docs/sonarqube.md.
+      - sonarqube_data:/opt/sonarqube/data
+      - sonarqube_extensions:/opt/sonarqube/extensions
+      - sonarqube_logs:/opt/sonarqube/logs
+    healthcheck:
+      # SonarQube's own status endpoint: reports UP only once the web server,
+      # the compute engine and the search index are all ready, which is a good
+      # deal later than the port opening.
+      #
+      # curl, not wget — this image is Ubuntu-based and ships curl only. A
+      # probe naming a binary the image does not have fails every time, and
+      # reports a perfectly healthy server as unhealthy.
+      test:
+        [
+          "CMD-SHELL",
+          "curl -fsS http://127.0.0.1:9000/api/system/status | grep -q '\"status\":\"UP\"'",
+        ]
+      # 15 minutes. The *first* start on an empty volume runs 72 database
+      # migrations and registers the full rule set for every bundled language:
+      # measured here at 12m35s from container start to the web server being
+      # up. Later starts, with the volume already populated, are far quicker.
+      # A failure inside start_period does not count against `retries`, so
+      # this window costs a faster machine nothing.
+      start_period: 900s
+      start_interval: 10s
+      interval: 60s
+      # 30s rather than 15s. While a Maven build was running alongside it, this
+      # probe repeatedly hit a 15s timeout against a server that was simply
+      # starved of CPU — SonarQube is the heaviest thing in this file and the
+      # probe should not report it dead merely because the machine is busy.
+      timeout: 30s
+      retries: 5
+
+  # =========================================================================
   # Optional: a monitor target that can be switched off  (--profile demo)
   # =========================================================================
 
@@ -382,10 +445,17 @@ services:
       start_period: 5s
 
 volumes:
-  # Both survive `docker compose down` and are removed only by
+  # All of these survive `docker compose down` and are removed only by
   # `docker compose down -v`, which deletes local PulseGuard data.
   mysql_data:
   kafka_data:
+
+  # SonarQube (--profile quality). Entirely separate from PulseGuard's own
+  # data: sonarqube_data holds the embedded evaluation database and the
+  # analysis history, and has nothing to do with the application's MySQL.
+  sonarqube_data:
+  sonarqube_extensions:
+  sonarqube_logs:
 
 networks:
   # One private network for the whole stack. Services find each other by

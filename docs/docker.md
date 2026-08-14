@@ -407,19 +407,52 @@ docker compose --profile tools --profile demo up -d --build
 | *(default)* | mysql, kafka, mailpit, control-api, monitor-worker, notification-service, frontend | Running PulseGuard |
 | `tools` | `kafka-ui` | Inspecting topics, partitions, offsets, keys and payloads |
 | `demo` | `demo-target` | A disposable HTTP endpoint to monitor, stop and restart |
+| `quality` | `sonarqube` | Static analysis and coverage — see [docs/sonarqube.md](sonarqube.md) |
 
-Neither profile is required for PulseGuard to work, and nothing in the
-application knows they exist. There are no Kafka UI links in the React
-application, and no PulseGuard service depends on `demo-target`.
+No profile is required for PulseGuard to work, and nothing in the application
+knows they exist. There are no Kafka UI links in the React application, no
+PulseGuard service depends on `demo-target`, and **nothing depends on
+SonarQube** — no `depends_on`, no runtime relationship of any kind.
+
+### The quality profile
+
+```bash
+docker compose --profile quality up -d sonarqube
+```
+
+Deliberately started on its own rather than alongside the stack. SonarQube runs
+an embedded Elasticsearch, is slow to start and is one of the heaviest things
+here — and the scanners read the source tree from your machine, so **the
+PulseGuard stack does not need to be running at all** to analyse the code.
+Running only the `sonarqube` container is the lightest way to work.
+
+If your machine is constrained, do not run this and `kafka-ui` at the same
+time:
+
+```bash
+docker compose stop kafka-ui
+```
+
+SonarQube stores its analysis in its own volumes (`sonarqube_data`,
+`sonarqube_extensions`, `sonarqube_logs`) using an embedded database that has
+**nothing to do with PulseGuard's MySQL**. Resetting SonarQube by name rather
+than with `down -v` is covered in [docs/sonarqube.md](sonarqube.md#stopping-and-resetting).
 
 ---
 
 ## Volumes and what destroys them
 
 ```text
-mysql_data   →  /var/lib/mysql            all PulseGuard data
-kafka_data   →  /var/lib/kafka/data       topic metadata and messages
+mysql_data              →  /var/lib/mysql          all PulseGuard data
+kafka_data              →  /var/lib/kafka/data     topic metadata and messages
+
+sonarqube_data          →  /opt/sonarqube/data     analysis history + embedded DB
+sonarqube_extensions    →  /opt/sonarqube/extensions
+sonarqube_logs          →  /opt/sonarqube/logs
 ```
+
+The three SonarQube volumes only exist once the `quality` profile has been
+started, and hold nothing belonging to PulseGuard.
 
 | Command | Containers | `mysql_data` | `kafka_data` |
 |---|---|---|---|

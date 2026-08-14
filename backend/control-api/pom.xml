@@ -20,6 +20,28 @@
 	<properties>
 		<java.version>21</java.version>
 		<project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+
+		<!--
+			Quality tooling (Task 13). None of this runs during an ordinary build:
+			the versions are only pinned here, and coverage lives behind the
+			`coverage` profile below. `./mvnw clean verify` never contacts SonarQube.
+		-->
+		<jacoco.version>0.8.13</jacoco.version>
+		<sonar.scanner.version>5.1.0.4751</sonar.scanner.version>
+
+		<sonar.projectKey>pulseguard-control-api</sonar.projectKey>
+		<sonar.projectName>PulseGuard Control API</sonar.projectName>
+		<sonar.coverage.jacoco.xmlReportPaths>${project.build.directory}/site/jacoco/jacoco.xml</sonar.coverage.jacoco.xmlReportPaths>
+
+		<!--
+			Coverage exclusions only — these files are still statically analysed for
+			bugs, vulnerabilities and smells. The list is deliberately conservative:
+			bootstrap, records and enum constants have nothing worth asserting.
+			Entities in this service are pure state — no behaviour beyond Lombok
+			accessors and equals/hashCode — and every DTO is a record.
+			No service, security, monitoring, outbox, event or email code is excluded.
+		-->
+		<sonar.coverage.exclusions>**/ControlApiApplication.java,**/dto/**,**/domain/**,**/enums/**,**/repository/projection/**</sonar.coverage.exclusions>
 	</properties>
 
 	<dependencies>
@@ -109,6 +131,21 @@
 	</dependencies>
 
 	<build>
+		<pluginManagement>
+			<plugins>
+				<!--
+					Pins the scanner version for `./mvnw sonar:sonar`. Declared in
+					pluginManagement rather than plugins so it is never bound to a
+					phase — an ordinary build does not know it exists.
+				-->
+				<plugin>
+					<groupId>org.sonarsource.scanner.maven</groupId>
+					<artifactId>sonar-maven-plugin</artifactId>
+					<version>${sonar.scanner.version}</version>
+				</plugin>
+			</plugins>
+		</pluginManagement>
+
 		<plugins>
 			<plugin>
 				<groupId>org.springframework.boot</groupId>
@@ -152,5 +189,42 @@
 			</plugin>
 		</plugins>
 	</build>
+
+	<profiles>
+		<!--
+			Coverage is opt-in. `./mvnw clean verify` runs exactly as before and
+			produces no coverage report; `./mvnw clean verify -Pcoverage` attaches
+			the JaCoCo agent and writes target/site/jacoco/jacoco.xml, which is what
+			SonarQube reads. Keeping it out of the default build means the everyday
+			edit-test loop pays nothing for a report nobody is looking at.
+		-->
+		<profile>
+			<id>coverage</id>
+			<build>
+				<plugins>
+					<plugin>
+						<groupId>org.jacoco</groupId>
+						<artifactId>jacoco-maven-plugin</artifactId>
+						<version>${jacoco.version}</version>
+						<executions>
+							<execution>
+								<id>jacoco-prepare-agent</id>
+								<goals>
+									<goal>prepare-agent</goal>
+								</goals>
+							</execution>
+							<execution>
+								<id>jacoco-report</id>
+								<phase>verify</phase>
+								<goals>
+									<goal>report</goal>
+								</goals>
+							</execution>
+						</executions>
+					</plugin>
+				</plugins>
+			</build>
+		</profile>
+	</profiles>
 
 </project>
