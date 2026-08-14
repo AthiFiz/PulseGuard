@@ -408,11 +408,38 @@ docker compose --profile tools --profile demo up -d --build
 | `tools` | `kafka-ui` | Inspecting topics, partitions, offsets, keys and payloads |
 | `demo` | `demo-target` | A disposable HTTP endpoint to monitor, stop and restart |
 | `quality` | `sonarqube` | Static analysis and coverage — see [docs/sonarqube.md](sonarqube.md) |
+| `ci` | `jenkins` | The build pipeline — see [docs/jenkins.md](jenkins.md) |
 
 No profile is required for PulseGuard to work, and nothing in the application
 knows they exist. There are no Kafka UI links in the React application, no
-PulseGuard service depends on `demo-target`, and **nothing depends on
-SonarQube** — no `depends_on`, no runtime relationship of any kind.
+PulseGuard service depends on `demo-target`, and **nothing depends on SonarQube
+or Jenkins** — no `depends_on`, no runtime relationship of any kind.
+
+### The ci profile
+
+```bash
+docker compose --profile ci up -d --build jenkins
+```
+
+**Name the service.** `docker compose --profile ci up -d` without it would also
+start the entire PulseGuard runtime stack, because the core services carry no
+profile and are therefore always eligible. The pipeline needs none of them —
+the suites it runs require no MySQL, no Kafka and no SMTP.
+
+Jenkins and SonarQube are independent profiles and can be started together when
+you want a Sonar-enabled build:
+
+```bash
+docker compose --profile ci --profile quality up -d jenkins sonarqube
+```
+
+Inside the Compose network Jenkins reaches SonarQube at `http://sonarqube:9000`
+— `localhost` there would be Jenkins itself. Humans still use
+`http://localhost:9000`.
+
+There is deliberately **no Docker socket mount and no privileged flag** on the
+Jenkins container. The pipeline builds no images, so it has no need to reach the
+Docker daemon, and cannot.
 
 ### The quality profile
 
@@ -449,10 +476,15 @@ kafka_data              →  /var/lib/kafka/data     topic metadata and messages
 sonarqube_data          →  /opt/sonarqube/data     analysis history + embedded DB
 sonarqube_extensions    →  /opt/sonarqube/extensions
 sonarqube_logs          →  /opt/sonarqube/logs
+
+jenkins_home            →  /var/jenkins_home       admin user, job, credentials, history
 ```
 
-The three SonarQube volumes only exist once the `quality` profile has been
-started, and hold nothing belonging to PulseGuard.
+The SonarQube and Jenkins volumes only exist once their profiles have been
+started, and hold nothing belonging to PulseGuard. Reset either one **by name**
+rather than with `down -v`, which would take MySQL and Kafka with it — see
+[docs/sonarqube.md](sonarqube.md#stopping-and-resetting) and
+[docs/jenkins.md](jenkins.md#persistence-and-resetting).
 
 | Command | Containers | `mysql_data` | `kafka_data` |
 |---|---|---|---|

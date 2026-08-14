@@ -417,6 +417,52 @@ services:
       retries: 5
 
   # =========================================================================
+  # Optional: continuous integration  (--profile ci)
+  # =========================================================================
+
+  jenkins:
+    # Runs the repository's own test commands and nothing else — see the root
+    # Jenkinsfile. No PulseGuard service depends on this, and Jenkins being
+    # stopped has no effect on any of them.
+    #
+    # There is deliberately no Docker socket mount and no privileged flag. This
+    # pipeline does not build or push images, so the container has no reason to
+    # be able to reach the Docker daemon — and cannot.
+    build:
+      context: ./ci/jenkins
+    image: pulseguard-jenkins:local
+    profiles: ["ci"]
+    environment:
+      # Jenkins reaches SonarQube by service name when both are running; the
+      # Jenkinsfile sets this too, and it is repeated here so the value is
+      # visible from `docker compose config`.
+      SONAR_HOST_URL: http://sonarqube:9000
+    ports:
+      # 8085, because the Control API already owns 8080 on the host. Inside the
+      # container Jenkins is still on its usual 8080.
+      #
+      # Port 50000 (inbound agents) is not published: this instance builds on
+      # its own controller and has no external agents.
+      - "127.0.0.1:${JENKINS_PORT:-8085}:8080"
+    volumes:
+      - jenkins_home:/var/jenkins_home
+      # The repository, read-only, so a Pipeline job can check out the local
+      # branch without anything being pushed first. Jenkins clones from here
+      # into its own workspace; it never writes back.
+      - ./:/pulseguard-repo:ro
+    healthcheck:
+      # /login is served as soon as the web UI is genuinely up, and needs no
+      # authentication. curl ships with the Jenkins base image.
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/login > /dev/null"]
+      # Calibrated from an actual first start on this machine rather than
+      # copied from SonarQube — Jenkins is markedly quicker to boot.
+      start_period: 300s
+      start_interval: 10s
+      interval: 60s
+      timeout: 20s
+      retries: 5
+
+  # =========================================================================
   # Optional: a monitor target that can be switched off  (--profile demo)
   # =========================================================================
 
@@ -456,6 +502,12 @@ volumes:
   sonarqube_data:
   sonarqube_extensions:
   sonarqube_logs:
+
+  # Jenkins (--profile ci). Holds the instance's whole configuration: the admin
+  # user, the job definition, credentials and build history. Removing it resets
+  # Jenkins to first-run state — see docs/jenkins.md for how to do that without
+  # touching PulseGuard's own volumes.
+  jenkins_home:
 
 networks:
   # One private network for the whole stack. Services find each other by
