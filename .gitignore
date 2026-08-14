@@ -13,7 +13,12 @@ dist/
 .env
 .env.local
 .env.*.local
+# Local Compose overrides, if a developer keeps them under this name rather
+# than copying the example to .env. compose.yaml, the Dockerfiles, the
+# .dockerignore files and .env.compose.example are all tracked deliberately.
+.env.compose
 !.env.example
+!.env.compose.example
 
 # --- IDE ---
 .idea/
