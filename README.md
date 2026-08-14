@@ -574,6 +574,63 @@ reading the dashboard, resetting only SonarQube's volumes — are in
 
 ---
 
+## Jenkins CI
+
+One repeatable pipeline that answers a single question: **does the current
+source build and pass its automated checks?** It runs the three backend test
+suites, then the frontend tests, typecheck and production build — and stops
+there. There is no Docker build, no image push and no deployment stage.
+
+```bash
+docker compose --profile ci up -d --build jenkins
+```
+
+Naming `jenkins` explicitly matters — `--profile ci up -d` alone would also
+start the whole PulseGuard runtime stack, which the pipeline does not need.
+
+Then open **<http://localhost:8085>** (8085, because the Control API owns 8080).
+
+```bash
+# Unlock with the initial password Jenkins generates:
+docker compose exec jenkins cat /var/jenkins_home/secrets/initialAdminPassword
+```
+
+At the wizard, choose **"Select plugins to install" → none** — the image
+already has the four it needs — then create your admin user and set the
+built-in node to **1 executor**.
+
+Create one job, **`PulseGuard-CI`**, as a Pipeline using *Pipeline script from
+SCM* → Git → repository `/pulseguard-repo` (the repo, bind-mounted read-only)
+→ Script Path `Jenkinsfile`. Everything else lives in the committed
+[`Jenkinsfile`](Jenkinsfile); the job holds only *where to find the code*.
+
+**Build with Parameters → Build.** Nothing else has to be running: the suites
+need no MySQL, no Kafka and no SMTP.
+
+### Optional SonarQube analysis
+
+`RUN_SONAR` defaults to **false**, so ordinary CI stays light. To scan:
+
+```bash
+docker compose --profile ci --profile quality up -d jenkins sonarqube
+```
+
+Add the analysis token as a Jenkins credential (**Secret text**, ID exactly
+`sonar-token`), then build with `RUN_SONAR` checked. It analyses the three
+backends; the frontend stays excluded, and the Quality Gate never blocks the
+build.
+
+> Jenkins is development tooling, like SonarQube. No PulseGuard service depends
+> on it, `docker compose up -d` does not start it, and `./mvnw clean verify`
+> works on your machine exactly as before — Jenkins is never required for
+> development.
+
+Full details — first-run setup, job configuration, private-repository
+credentials, the Sonar token, failure behaviour and troubleshooting — are in
+**[docs/jenkins.md](docs/jenkins.md)**.
+
+---
+
 ## Building the Frontend
 
 ```bash

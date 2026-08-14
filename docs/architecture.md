@@ -819,6 +819,63 @@ to PulseGuard's MySQL in every respect.
 
 ---
 
+## Continuous integration: Jenkins (Stage 14)
+
+Like SonarQube, Jenkins is **outside the architecture**. It reads the
+repository, runs the same commands a developer runs, and reports. It is shown
+here only to make that boundary explicit.
+
+```text
+   ┌──────────────────────────────────────────────────────────────┐
+   │  CONTINUOUS INTEGRATION — no runtime relationship             │
+   │                                                              │
+   │      git repository                                          │
+   │            │                                                 │
+   │            ▼                                                 │
+   │        Jenkins   :8085   (--profile ci)                      │
+   │            │                                                 │
+   │            ├──▶ control-api          ./mvnw clean verify     │
+   │            ├──▶ monitor-worker       ./mvnw clean verify     │
+   │            ├──▶ notification-service ./mvnw clean verify     │
+   │            ├──▶ frontend             npm ci · vitest ·       │
+   │            │                         typecheck · build       │
+   │            │                                                 │
+   │            └──▶ optional: backend Sonar scan                 │
+   │                        │                                     │
+   │                        ▼                                     │
+   │                 SonarQube :9000  (--profile quality)         │
+   └──────────────────────────────────────────────────────────────┘
+
+   The runtime — frontend, control-api, monitor-worker,
+   notification-service, MySQL, Kafka, Mailpit — has no edge
+   of any kind to this box, in either direction.
+```
+
+**The pipeline ends at verification.** There is no packaging stage, no image
+push, no registry and no deployment step. Stage 12 established that the images
+build; publishing and deploying them belongs to a later stage, and until then
+the Jenkins container has neither the Docker socket nor any cloud tooling — it
+is not merely told not to deploy, it cannot.
+
+### Why it needs no infrastructure
+
+The suites Jenkins runs are the fast ones — the Stage 11 decision — so a build
+starts nothing and depends on nothing. No MySQL, no Kafka, no SMTP, no Docker.
+That is what makes CI here simple and its result unambiguous: a green build
+cannot be an accident of what happened to be running.
+
+It also bounds what a green build means. Schema, Kafka round trip and email
+delivery remain manually verified, exactly as before.
+
+### Sequential on purpose
+
+The three backends are independent Maven projects and could be built in
+parallel. They are not: three JVMs compiling and testing at once saturates the
+development machine, and starved tests fail for reasons unrelated to the code.
+Correctness over build time, until the hardware justifies otherwise.
+
+---
+
 ## Future Architecture
 
 ```text

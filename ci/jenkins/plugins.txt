@@ -1,0 +1,26 @@
+# Minimal plugin set for the PulseGuard pipeline. Each line earns its place;
+# `jenkins-plugin-cli` resolves the dependencies of these automatically (67
+# plugins in total, almost all of them transitive dependencies of the Pipeline
+# umbrella).
+#
+# Versions are pinned so rebuilding this image does not silently pick up new
+# releases. These four are the versions that were actually resolved against
+# Jenkins 2.568.2 and verified in a running container — not guessed.
+#
+# Deliberately absent: the SonarQube plugin (the Maven scanner already works and
+# is invoked directly — see docs/sonarqube.md), the Docker Pipeline plugin
+# (nothing is built or pushed here), and anything for Kubernetes or AWS.
+
+# Declarative Pipeline itself — the umbrella that pulls in workflow-*,
+# pipeline-model-definition and the stage view.
+workflow-aggregator:608.v67378e9d3db_1
+
+# Checking the repository out in "Pipeline script from SCM".
+git:5.10.1
+
+# withCredentials(), used only to bind the Sonar token in the optional stage.
+credentials-binding:728.v902a_273b_8947
+
+# Publishes the Maven Surefire XML so Jenkins shows backend test counts,
+# failures and history rather than only console output.
+junit:1418.v67a_81935603c
