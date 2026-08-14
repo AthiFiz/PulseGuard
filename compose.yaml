@@ -437,6 +437,21 @@ services:
       # Jenkinsfile sets this too, and it is repeated here so the value is
       # visible from `docker compose config`.
       SONAR_HOST_URL: http://sonarqube:9000
+
+      # Allows a Pipeline job to check out from the bind-mounted repository at
+      # /pulseguard-repo. The Git plugin refuses local-directory checkouts by
+      # default, and it is right to: on a shared Jenkins, anyone able to
+      # configure a job could point it at an arbitrary host path and read
+      # whatever the controller can see.
+      #
+      # That threat does not apply here. This is a single-user local instance,
+      # the only path mounted is this repository, and it is mounted read-only.
+      # The alternative — pushing every branch to GitHub before it can be
+      # built — would make local CI useless for exactly the case it exists for.
+      #
+      # A deployed Jenkins should leave this off and check out from a real
+      # remote.
+      JAVA_OPTS: "-Dhudson.plugins.git.GitSCM.ALLOW_LOCAL_CHECKOUT=true"
     ports:
       # 8085, because the Control API already owns 8080 on the host. Inside the
       # container Jenkins is still on its usual 8080.

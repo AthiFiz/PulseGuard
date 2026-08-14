@@ -139,6 +139,31 @@ Under **Pipeline**:
 Jenkins clones from it into its own workspace and never writes back, so builds
 cannot disturb your working tree.
 
+### Why local checkout needs a flag
+
+The Git plugin refuses to check out from a local directory unless explicitly
+allowed, and fails with:
+
+```text
+Checkout of Git remote '/pulseguard-repo' aborted because it references a local
+directory, which may be insecure.
+```
+
+That refusal is correct on a shared Jenkins: anyone who can configure a job
+could point it at an arbitrary host path and read whatever the controller can
+see. The Compose file therefore opts in deliberately rather than silently:
+
+```yaml
+JAVA_OPTS: "-Dhudson.plugins.git.GitSCM.ALLOW_LOCAL_CHECKOUT=true"
+```
+
+The reasoning, so it can be re-examined rather than inherited: this is a
+single-user local instance, the only host path mounted is this repository, and
+it is mounted **read-only**. The alternative — pushing every branch to GitHub
+before it can be built — would defeat the purpose of a local CI loop.
+
+**A deployed Jenkins should leave this off** and check out from a real remote.
+
 **This means Jenkins builds commits, not your working tree.** Uncommitted
 changes are invisible to it — which is correct CI behaviour, and worth knowing
 before wondering why an edit had no effect.
@@ -236,6 +261,19 @@ JavaScript analyzer rejects this project's Node version and the toolchain was
 not going to move for a reporting tool. Jenkins having Node 22 does not reopen
 that — the analyzer runs against the project's Node, not Jenkins'.
 
+> **Not yet exercised.** The stage is proven to *skip* correctly when
+> `RUN_SONAR` is false — the build log shows `Stage "SonarQube" skipped due to
+> when conditional`. The `RUN_SONAR=true` path has **not** been run: SonarQube
+> takes ~13 minutes to start on the development machine and the scan re-runs
+> all three backend builds, which was not a good use of a constrained laptop
+> right after a 39-minute pipeline. It is deferred to the stage where CI moves
+> onto real hardware.
+>
+> What is known to work is each half separately: the scan commands are the
+> Stage 13 script, which has been run successfully by hand, and the credential
+> binding is standard `withCredentials`. What has not been observed is the two
+> together inside Jenkins.
+
 ### SonarQube is reached by service name
 
 ```text
@@ -277,9 +315,34 @@ A failing stage stops the pipeline — later stages do not run and cannot report
 success. A broken Control API test means the Monitor Worker stage never starts,
 and the build is red.
 
-This is the intended behaviour and is worth checking once yourself: break a
-test locally, commit it on a scratch branch, build that branch, and watch the
-pipeline go red at the right stage.
+**Partly demonstrated, honestly.** The very first build failed at checkout (the
+local-checkout flag was not yet set), and the pipeline behaved correctly: it
+stopped immediately and no later stage ran or reported success. That is
+evidence the pipeline halts on failure — but it is a *checkout* failure, not a
+*test* failure, and the two are not the same claim.
+
+**The failing-test case has not been run.** It needs a commit, because Jenkins
+builds commits and never sees an uncommitted edit, and it costs a full pipeline
+run on a machine where that takes ~40 minutes. It is deferred to the stage
+where CI moves onto real hardware.
+
+To do it then:
+
+```bash
+git checkout -b tmp/ci-failure-demo
+# break one assertion in a control-api test
+git commit -am "tmp: deliberately failing test"
+
+# point the job's Branch Specifier at */tmp/ci-failure-demo and build
+#   expect: FAILURE at the Control API stage
+#           Monitor Worker, Notification Service and Frontend never start
+#           Jenkins shows the failing test under Test Result
+
+git checkout feat/jenkins-ci
+git branch -D tmp/ci-failure-demo
+```
+
+Never commit the deliberate failure to a real branch.
 
 ---
 
@@ -341,6 +404,10 @@ Honest limitations of that list:
   machinery for a single-developer local instance, and it is a real difference.
 - The setup wizard, admin user and job are configured by hand. No Configuration
   as Code, deliberately — it is useful for a real deployment and overhead here.
+- `ALLOW_LOCAL_CHECKOUT` is enabled so the local repository can be built
+  without pushing (see [above](#why-local-checkout-needs-a-flag)). It is a
+  protection that has been switched off knowingly, for a specific reason, and
+  should be switched back on anywhere else.
 
 ---
 
