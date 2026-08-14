@@ -1,0 +1,31 @@
+# Keep the build context to what the image actually needs: package.json,
+# package-lock.json, the tsconfigs, index.html, src/, public/ and nginx/.
+
+# Installed and built output — the image produces its own. A host node_modules
+# built on macOS would also carry the wrong platform binaries.
+node_modules/
+dist/
+.vite/
+*.tsbuildinfo
+
+# Version control and IDE metadata
+.git/
+.gitignore
+.idea/
+.vscode/
+
+# Local environment files. The API base URL for the image comes from the
+# VITE_API_BASE_URL build argument, not from a developer's .env.
+.env
+.env.*
+!.env.example
+
+# Local noise
+*.log
+npm-debug.log*
+.DS_Store
+coverage/
+
+# Docker's own files: changing this list should not invalidate the build.
+Dockerfile
+.dockerignore

@@ -1,0 +1,395 @@
+# PulseGuard — local Docker development stack.
+#
+#   docker compose up -d --build
+#
+# brings up MySQL, Kafka, all three backend services, the frontend and Mailpit.
+# Nothing has to be configured first: every value below has a development
+# default, and .env.compose.example documents the ones worth overriding.
+#
+# This is DEVELOPMENT infrastructure. Single-node Kafka, a MySQL container, a
+# fake mail server and a plaintext broker are all fine on a laptop and none of
+# them describe the eventual AWS architecture — see docs/docker.md.
+#
+# Two optional profiles sit on top of the core stack:
+#   --profile tools   Kafka UI, for inspecting topics and messages
+#   --profile demo    a disposable HTTP target to monitor
+
+name: pulseguard
+
+services:
+
+  # =========================================================================
+  # Infrastructure
+  # =========================================================================
+
+  mysql:
+    image: mysql:8.0.46
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-pulseguard_root_dev}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-pulseguard}
+      # The application user. Nothing connects as root — the services only ever
+      # need rights on this one database, and Flyway's DDL is included in that.
+      MYSQL_USER: ${MYSQL_USER:-pulseguard}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-pulseguard_dev}
+    ports:
+      # 3307, not 3306: a developer machine very often already has MySQL
+      # running, and this must not fight it. Inside the network the port is
+      # still the ordinary 3306 — containers use mysql:3306.
+      - "127.0.0.1:${MYSQL_HOST_PORT:-3307}:3306"
+    volumes:
+      # Survives `docker compose down`. Only `down -v` deletes it.
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      # Deliberately a real query as the application user against the
+      # application database, not a port check. It answers the question the
+      # dependent services actually care about: can they connect and is the
+      # schema's database there? The host is forced to 127.0.0.1 so this speaks
+      # TCP — the MySQL image runs a temporary socket-only server while it
+      # initialises, and a socket-based check would report success against it
+      # seconds before the real server is listening.
+      test:
+        [
+          "CMD-SHELL",
+          "mysql -h 127.0.0.1 -u\"$$MYSQL_USER\" -p\"$$MYSQL_PASSWORD\" -e 'SELECT 1' \"$$MYSQL_DATABASE\"",
+        ]
+      # start_interval applies only while the container is inside start_period:
+      # probe often during startup, then settle to a cheap heartbeat. The first
+      # run on an empty volume has to initialise the whole data directory, which
+      # took around 95 seconds here, so start_period is generous — a failure
+      # during it does not count against `retries`.
+      start_period: 180s
+      start_interval: 5s
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  kafka:
+    image: apache/kafka:4.3.1
+    environment:
+      # Single-node KRaft: this one process is both the broker and the
+      # controller. No ZooKeeper, and no second broker — replication belongs to
+      # the deployment stage, not to a laptop.
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      CLUSTER_ID: ${KAFKA_CLUSTER_ID:-ieFOxL_TTTi1uB7hKr9Q7Q}
+
+      # Two client listeners, because there are two kinds of client and they
+      # need to be told different things.
+      #
+      #   INTERNAL  reached from other containers, advertised as kafka:29092
+      #   EXTERNAL  reached from the host, advertised as localhost:19092
+      #
+      # Advertising "localhost" to a container would point it at itself, and
+      # advertising "kafka" to a host process would not resolve at all. A
+      # client connects, is told where to go, and then reconnects there — so
+      # the advertised name has to be correct from the client's position.
+      #
+      # 19092 rather than 9092 on the host: a locally installed Kafka may
+      # already own 9092, and the two must not collide.
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:29092,EXTERNAL://0.0.0.0:19092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://localhost:19092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+
+      # One node means one replica; the defaults of 3 would leave the internal
+      # topics unable to initialise.
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      # No reason to make a single consumer wait out a rebalance window.
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+
+      # Off on purpose. The Monitor Worker declares
+      # pulseguard.incident-events.v1 with three partitions, and auto-creation
+      # would let whichever client asked first win the race with a
+      # single-partition topic instead — which cannot be widened afterwards by
+      # the same declaration.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+
+      # The image's default is /tmp. This directory already exists in the image
+      # owned by the unprivileged user it runs as, so a named volume mounted
+      # here inherits that ownership and stays writable.
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+    ports:
+      - "127.0.0.1:${KAFKA_HOST_PORT:-19092}:19092"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      # Uses the broker's own CLI, already in the image, rather than adding a
+      # container just to probe one. Listing topics proves the broker is
+      # answering API requests, not merely that a socket is open.
+      test:
+        [
+          "CMD-SHELL",
+          "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:29092 --list > /dev/null 2>&1",
+        ]
+      # This probe is expensive: it starts a JVM, which measured around 22
+      # seconds on this machine and 39 under load. The timeout has to clear
+      # that, and the steady-state interval has to be long enough that the
+      # broker is not permanently running a second JVM to check on itself.
+      # start_interval keeps startup responsive despite the slow interval.
+      start_period: 120s
+      start_interval: 5s
+      interval: 120s
+      timeout: 60s
+      retries: 3
+
+  mailpit:
+    image: axllent/mailpit:v1.30.7
+    environment:
+      MP_SMTP_AUTH_ACCEPT_ANY: "true"
+      MP_SMTP_AUTH_ALLOW_INSECURE: "true"
+    ports:
+      - "127.0.0.1:${MAILPIT_UI_PORT:-8025}:8025"
+      # Published so a host process — the non-Docker Notification Service, or a
+      # manual SMTP test — can use the same sink.
+      - "127.0.0.1:${MAILPIT_SMTP_PORT:-1025}:1025"
+
+  # =========================================================================
+  # PulseGuard services
+  # =========================================================================
+
+  control-api:
+    build:
+      context: ./backend/control-api
+    image: pulseguard-control-api:local
+    environment:
+      DB_URL: "jdbc:mysql://mysql:3306/${MYSQL_DATABASE:-pulseguard}?connectionTimeZone=UTC&preserveInstants=true"
+      DB_USERNAME: ${MYSQL_USER:-pulseguard}
+      DB_PASSWORD: ${MYSQL_PASSWORD:-pulseguard_dev}
+      # DEVELOPMENT ONLY. Supplied as runtime configuration rather than baked
+      # into the image, which is the part that matters: the same image is
+      # deployed with a real secret from a real secret store later.
+      JWT_SECRET: ${JWT_SECRET:-7/YrZhvu3Czj1vFr94+MH8aRu5DBzMJL/82TT9BO6XI=}
+      # The Docker frontend proxies /api through nginx, so its calls are
+      # same-origin and need no CORS at all. This stays set for the developer
+      # who runs Vite on the host against this container, and is deliberately
+      # a specific origin rather than "*".
+      FRONTEND_ORIGIN: ${FRONTEND_ORIGIN:-http://localhost:5173}
+    ports:
+      - "127.0.0.1:${CONTROL_API_PORT:-8080}:8080"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    healthcheck:
+      # Actuator answers 503 when a component is down, so -f is enough to make
+      # that a failed probe.
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/actuator/health > /dev/null"]
+      # Sized for the slowest machine this has to work on, not the fastest.
+      # Measured cold starts here were 229s (control-api), 244s (notification)
+      # and 302s (worker), so earlier settings of 180s and then 300s were both
+      # being overrun by an application that was merely still booting. Seven
+      # minutes puts real distance between the window and the worst observed
+      # start. A failure inside start_period does not count against `retries`,
+      # and start_interval keeps the dependency gate responsive, so a generous
+      # window costs nothing on a fast machine — it is simply never reached.
+      # Tighten these considerably for real hardware.
+      start_period: 420s
+      start_interval: 5s
+      interval: 30s
+      # 20s, not 10s: the very first request to /actuator/health also
+      # initialises Spring's DispatcherServlet, and on a slow machine that
+      # first probe overran a 10s timeout twice before succeeding. Steady-state
+      # probes answer in milliseconds; this headroom is only for the first one.
+      timeout: 20s
+      retries: 5
+
+  monitor-worker:
+    build:
+      context: ./backend/monitor-worker
+    image: pulseguard-monitor-worker:local
+    environment:
+      DB_URL: "jdbc:mysql://mysql:3306/${MYSQL_DATABASE:-pulseguard}?connectionTimeZone=UTC&preserveInstants=true"
+      DB_USERNAME: ${MYSQL_USER:-pulseguard}
+      DB_PASSWORD: ${MYSQL_PASSWORD:-pulseguard_dev}
+      # The internal listener. localhost:19092 is the host's way in and would
+      # mean this container itself.
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+
+      # ---------------------------------------------------------------
+      # DEVELOPMENT ONLY — do not carry this into any deployed environment
+      # ---------------------------------------------------------------
+      # Every address inside a Compose network is private (172.16.0.0/12), so
+      # the SSRF policy that protects a deployed PulseGuard would refuse to
+      # monitor anything reachable here: not demo-target, not control-api, not
+      # a colleague's service on the same network. Turning it off is what makes
+      # a Docker-internal monitoring demo possible at all.
+      #
+      # This widens the blast radius of a malicious monitor URL to the whole
+      # Compose network, which is acceptable on a laptop and nowhere else. The
+      # cloud metadata endpoints stay blocked regardless of this setting —
+      # that list is unconditional in DestinationPolicy, not part of the
+      # private-address rule.
+      MONITOR_ALLOW_PRIVATE_ADDRESSES: ${MONITOR_ALLOW_PRIVATE_ADDRESSES:-true}
+    ports:
+      - "127.0.0.1:${MONITOR_WORKER_PORT:-8081}:8081"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      # Not because the worker calls the Control API — it never does — but
+      # because the Control API owns Flyway. Starting before the migrations
+      # have run would put this service's ddl-auto=validate up against a
+      # half-built schema, and it would fail to start.
+      control-api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8081/actuator/health > /dev/null"]
+      # Timings as on control-api above.
+      start_period: 420s
+      start_interval: 5s
+      interval: 30s
+      # 20s, not 10s: the very first request to /actuator/health also
+      # initialises Spring's DispatcherServlet, and on a slow machine that
+      # first probe overran a 10s timeout twice before succeeding. Steady-state
+      # probes answer in milliseconds; this headroom is only for the first one.
+      timeout: 20s
+      retries: 5
+
+  notification-service:
+    build:
+      context: ./backend/notification-service
+    image: pulseguard-notification-service:local
+    environment:
+      DB_URL: "jdbc:mysql://mysql:3306/${MYSQL_DATABASE:-pulseguard}?connectionTimeZone=UTC&preserveInstants=true"
+      DB_USERNAME: ${MYSQL_USER:-pulseguard}
+      DB_PASSWORD: ${MYSQL_PASSWORD:-pulseguard_dev}
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+
+      # Mailpit accepts anything and delivers nowhere, which is exactly what a
+      # development mail server should do. No auth, no TLS.
+      MAIL_HOST: mailpit
+      MAIL_PORT: 1025
+      MAIL_FROM: ${MAIL_FROM:-pulseguard@localhost}
+
+      # A browser-facing URL on purpose. Emails contain incident links, and
+      # they are opened from the host — "http://frontend" would resolve only
+      # inside this network, which is the one place the reader is not.
+      FRONTEND_BASE_URL: ${FRONTEND_BASE_URL:-http://localhost:5173}
+    ports:
+      - "127.0.0.1:${NOTIFICATION_SERVICE_PORT:-8082}:8082"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      control-api:
+        condition: service_healthy
+      # Started, not healthy. This service is built to survive a mail server
+      # being away — deliveries queue in the database and retry — so making
+      # SMTP a readiness gate would assert something the design deliberately
+      # denies.
+      mailpit:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8082/actuator/health > /dev/null"]
+      # Timings as on control-api above.
+      start_period: 420s
+      start_interval: 5s
+      interval: 30s
+      # 20s, not 10s: the very first request to /actuator/health also
+      # initialises Spring's DispatcherServlet, and on a slow machine that
+      # first probe overran a 10s timeout twice before succeeding. Steady-state
+      # probes answer in milliseconds; this headroom is only for the first one.
+      timeout: 20s
+      retries: 5
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        # Empty means same-origin: the bundle asks for "/api/v1/..." and nginx
+        # forwards it to control-api:8080. See frontend/nginx/default.conf.
+        VITE_API_BASE_URL: ""
+    image: pulseguard-frontend:local
+    ports:
+      # 5173 is kept even though this is nginx rather than Vite, so that
+      # bookmarks and the incident links inside notification emails keep
+      # working across both workflows.
+      - "127.0.0.1:${FRONTEND_PORT:-5173}:80"
+    depends_on:
+      control-api:
+        condition: service_healthy
+    healthcheck:
+      # busybox wget, already in the nginx alpine image.
+      # 127.0.0.1, not localhost: busybox wget resolves "localhost" to ::1
+      # first, and this nginx listens on IPv4 only, so the name form fails
+      # with "connection refused" against a server that is working fine.
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/ || exit 1"]
+      start_period: 30s
+      start_interval: 3s
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+  # =========================================================================
+  # Optional: development tooling  (--profile tools)
+  # =========================================================================
+
+  kafka-ui:
+    # Turn this on to inspect Kafka, and turn it off again. It was observed
+    # sitting at roughly 300% CPU while idle on the development machine, which
+    # on a small Docker VM is enough to starve the rest of the stack — Kafka's
+    # health probe times out, the Control API's connection to MySQL breaks, and
+    # the services gated behind it never start. Nothing misconfigured; just no
+    # CPU left. See "Kafka UI can saturate a small VM" in docs/docker.md.
+    #
+    # No cpu/memory limit is set here on purpose: capping a development tool
+    # from one laptop's numbers would be guesswork.
+    image: ghcr.io/kafbat/kafka-ui:v1.5.0
+    profiles: ["tools"]
+    environment:
+      KAFKA_CLUSTERS_0_NAME: PulseGuard Local
+      # The internal listener — this runs inside the network like any other
+      # container.
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+      DYNAMIC_CONFIG_ENABLED: "true"
+    ports:
+      - "127.0.0.1:${KAFKA_UI_PORT:-8090}:8080"
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  # =========================================================================
+  # Optional: a monitor target that can be switched off  (--profile demo)
+  # =========================================================================
+
+  demo-target:
+    # Stock nginx returning its welcome page with HTTP 200. Nothing is built
+    # for this; the point is only to have something inside the network that can
+    # be stopped and started on command.
+    #
+    #   Monitor URL:  http://demo-target/     expected status: 200
+    #   docker compose stop demo-target   -> real check failures -> incident
+    #   docker compose start demo-target  -> recovery -> incident resolved
+    #
+    # Stopping a container also removes its name from Docker's DNS, so the
+    # recorded failures come back as DNS_ERROR rather than a connection
+    # refusal. Still a genuine outage, and it drives the incident identically.
+    image: nginx:1.29-alpine
+    profiles: ["demo"]
+    ports:
+      - "127.0.0.1:${DEMO_TARGET_PORT:-8088}:80"
+    healthcheck:
+      # 127.0.0.1 rather than localhost, matching the frontend probe above.
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  # Both survive `docker compose down` and are removed only by
+  # `docker compose down -v`, which deletes local PulseGuard data.
+  mysql_data:
+  kafka_data:
+
+networks:
+  # One private network for the whole stack. Services find each other by
+  # service name through Docker's DNS — there are no container IPs anywhere in
+  # this file, and no host networking.
+  default:
+    name: pulseguard-network

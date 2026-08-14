@@ -73,7 +73,108 @@ configuration, performs the checks, and writes the results back.
 
 ---
 
+## Docker Quick Start
+
+The fastest way to run all of PulseGuard. Requires only Docker Desktop (or
+Docker Engine with the Compose plugin) — no Java, Node, MySQL or Kafka on your
+machine.
+
+```bash
+docker compose up -d --build
+```
+
+Then open:
+
+| | |
+| --- | --- |
+| **Frontend** | <http://localhost:5173> |
+| **Control API** | <http://localhost:8080> |
+| Monitor Worker | <http://localhost:8081> |
+| Notification Service | <http://localhost:8082> |
+| **Mailpit** (all outgoing email) | <http://localhost:8025> |
+| Kafka UI (`tools` profile) | <http://localhost:8090> |
+
+Infrastructure is published on non-default host ports so it cannot collide with
+a MySQL or Kafka you already have installed:
+
+```text
+MySQL     localhost:3307        (containers use  mysql:3306)
+Kafka     localhost:19092       (containers use  kafka:29092)
+```
+
+Register an account at <http://localhost:5173> and you have a working
+PulseGuard. There is nothing to configure first: the database is created and
+migrated automatically, and every credential has a development default.
+
+### Profiles
+
+```bash
+docker compose up -d --build                                  # core stack
+docker compose --profile tools up -d --build                  # + Kafka UI
+docker compose --profile tools --profile demo up -d --build   # + a target to monitor
+```
+
+| Profile | Adds | For |
+| --- | --- | --- |
+| *(default)* | MySQL, Kafka, Mailpit, all three backends, frontend | Running PulseGuard |
+| `tools` | Kafka UI | Browsing topics, partitions, keys and payloads |
+| `demo` | `demo-target` | A disposable endpoint you can stop to cause a real outage |
+
+The `demo` profile is the quickest way to see the whole system work. Create a
+monitor for `http://demo-target/` expecting `200`, then:
+
+```bash
+docker compose stop demo-target      # → checks fail → monitor DOWN → incident → email
+docker compose start demo-target     # → recovery → incident resolved → email
+```
+
+### Lifecycle
+
+```bash
+docker compose ps                       # status — check HEALTH, not just "running"
+docker compose logs -f control-api      # logs for one service
+docker compose stop                     # pause, keeping containers
+docker compose start                    # resume
+docker compose restart monitor-worker   # restart one service
+docker compose down                     # remove containers; data survives
+docker compose down -v                  # ⚠ DESTRUCTIVE — also deletes all data
+```
+
+> **`docker compose down -v` is not "stop the application".** It permanently
+> deletes the Docker MySQL volume — every user, project, monitor, check and
+> incident — and the Kafka volume with it. A MySQL server installed on your own
+> machine is untouched; the two are entirely separate.
+
+### Important: `localhost` inside a container
+
+Inside a container, `localhost` means *that container*. A monitor URL of
+`http://localhost:8080/...` is resolved by the **Monitor Worker**, where nothing
+is listening. To monitor something inside the stack, use its service name:
+
+```text
+http://control-api:8080/actuator/health
+http://demo-target/
+```
+
+Because every Compose address is private, the worker runs with
+`MONITOR_ALLOW_PRIVATE_ADDRESSES=true`, which is **local development only** and
+must never be a deployed default. Cloud metadata endpoints stay blocked either
+way.
+
+**Full details — architecture, environment variables, health checks, volumes,
+Kafka UI, Mailpit and troubleshooting — are in
+[`docs/docker.md`](docs/docker.md).**
+
+Docker is optional. Everything below describes running PulseGuard directly on
+your machine, which remains the faster loop for day-to-day development and is
+required for running the test suites.
+
+---
+
 ## Prerequisites
+
+For the Docker workflow above, only Docker is needed. To run PulseGuard
+directly on your machine:
 
 ```text
 Java 21
@@ -128,16 +229,30 @@ Never edit a migration that has already been applied — add a new one.
 pulseguard/
 ├── backend/
 │   ├── control-api/        Spring Boot application (independent Maven project)
+│   │   ├── Dockerfile              multi-stage: JDK build → JRE runtime
+│   │   ├── .dockerignore
 │   │   └── src/main/
 │   │       ├── java/.../domain/        JPA entities
 │   │       ├── java/.../domain/enums/  persisted enums
 │   │       ├── java/.../repository/    Spring Data repositories
 │   │       └── resources/db/migration/ Flyway migrations
 │   ├── monitor-worker/     Spring Boot application (independent Maven project)
+│   │   ├── Dockerfile
+│   │   └── .dockerignore
 │   └── notification-service/  Spring Boot application (independent Maven project)
+│       ├── Dockerfile
+│       └── .dockerignore
 ├── frontend/               React + TypeScript + Vite application
+│   ├── Dockerfile              multi-stage: Node build → nginx runtime
+│   ├── .dockerignore
+│   └── nginx/default.conf      SPA fallback + /api reverse proxy
 ├── docs/
-│   └── architecture.md
+│   ├── architecture.md
+│   ├── docker.md           Docker runbook
+│   ├── testing-hardening.md
+│   └── contracts/          shared event fixtures
+├── compose.yaml            the whole local stack
+├── .env.compose.example    documented Compose overrides (none required)
 ├── .editorconfig
 ├── .gitignore
 └── README.md
@@ -146,7 +261,10 @@ pulseguard/
 `backend/` is a plain folder, not a Maven aggregator. `control-api`,
 `monitor-worker` and `notification-service` are three fully independent Maven
 projects, each with its own wrapper, and each can be opened on its own in
-IntelliJ IDEA.
+IntelliJ IDEA. Each also has its **own** Dockerfile and `.dockerignore` and is
+built from its own directory as the Docker context — the small Dockerfile
+pattern is duplicated deliberately rather than shared, because the services must
+stay independently deployable.
 
 ---
 
@@ -265,6 +383,12 @@ The origin above must also be allowed by the Control API's CORS configuration
 changing both.
 
 ### Running the whole stack
+
+> There are two ways to run everything. This section describes running it
+> **directly on your machine**, which is the faster loop while developing and is
+> what the test suites use. The alternative is
+> [`docker compose up -d --build`](#docker-quick-start), which needs nothing
+> installed but Docker. Both remain fully supported; neither replaces the other.
 
 Infrastructure first, then each application in its own terminal:
 
@@ -809,8 +933,20 @@ The frontend reads:
 | ------------------- | ----------------------- | --------------------- |
 | `VITE_API_BASE_URL` | `http://localhost:8080` | Control API base URL  |
 
+`VITE_API_BASE_URL` is read at **build** time, not at runtime — Vite substitutes
+it into the bundle. Setting it to an **empty string** makes the application
+request `/api/v1/...` with no host, i.e. same-origin. That is what the Docker
+image is built with, so nginx can proxy those calls to the Control API; see
+[`docs/docker.md`](docs/docker.md). Leaving it unset keeps the
+`http://localhost:8080` default that the Vite dev server relies on.
+
 Database credentials are the only secrets so far, and they are supplied through
 the environment. Nothing sensitive is committed.
+
+The Docker Compose stack sets these same variables, plus its own infrastructure
+ones, with development defaults that need no setup — all listed in
+[`.env.compose.example`](.env.compose.example) and explained in
+[`docs/docker.md`](docs/docker.md).
 
 ---
 

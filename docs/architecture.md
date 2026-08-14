@@ -647,6 +647,121 @@ The remaining limitations above belong to a later stage.
 
 ---
 
+## Deployment view: Docker Compose (Stage 12)
+
+Everything above describes the *logical* architecture, which containerisation
+did not change. This section describes how those same components are packaged
+and wired when the whole system runs from `docker compose up -d --build`. The
+operational detail — ports, environment variables, troubleshooting — lives in
+[docs/docker.md](docker.md).
+
+```text
+                                Browser
+                                   │
+                                   │  http://localhost:5173
+                                   ▼
+                         ┌──────────────────┐
+                         │ frontend (nginx) │
+                         │ · static SPA     │
+                         │ · try_files → SPA│
+                         │ · /api/* proxy ──┼──┐
+                         └──────────────────┘  │  control-api:8080
+                                               ▼
+                                    ┌──────────────────┐
+                                    │   control-api    │
+                                    │ sole Flyway owner│
+                                    └────────┬─────────┘
+                                             │
+                                             ▼
+                                    ┌──────────────────┐
+                    ┌──────────────▶│      mysql       │◀──────────────┐
+                    │               │ volume mysql_data│               │
+                    │               └──────────────────┘               │
+                    │                                                  │
+         ┌──────────┴──────────┐                    ┌──────────────────┴───┐
+         │   monitor-worker    │                    │ notification-service │
+         │  checks, incidents  │                    │    Kafka consumer    │
+         │   outbox producer   │                    │    email delivery    │
+         └──────────┬──────────┘                    └───────┬──────────────┘
+                    │ publishes                    consumes │
+                    │           ┌──────────────────┐        │
+                    └──────────▶│      kafka       │───────▶┘
+                                │ single-node KRaft│
+                                │ volume kafka_data│
+                                └────────┬─────────┘
+                                         │ observed by
+                                         ▼
+                                ┌──────────────────┐
+                                │ kafka-ui (tools) │
+                                └──────────────────┘
+
+      notification-service ──SMTP──▶ mailpit ──▶ web inbox :8025
+```
+
+### What containerisation did *not* change
+
+No service was split, merged, or given a new responsibility. The Control API is
+still the configuration and query plane and the only holder of Flyway; the
+Monitor Worker still owns checks, the incident lifecycle and the outbox; the
+Notification Service still consumes from Kafka and delivers email on its own
+schedule; the frontend still talks only to the Control API. The two backends
+still never call each other — they meet in the database.
+
+### Three things Compose has to get right
+
+**Flyway ordering.** On an empty volume the schema does not exist, and both the
+worker and the notification service start with `ddl-auto=validate` — they
+compare their JPA mappings against the live schema and refuse to start if it is
+missing. Both therefore wait for `control-api` to report *healthy*, not merely
+running. They do not call it; they wait because it is the service that creates
+the tables. Ordering is expressed entirely with Compose health conditions —
+there are no sleeps anywhere.
+
+**Two Kafka listeners.** A Kafka client connects, is told where the broker
+really is, and reconnects there — so the advertised address has to be correct
+*from the client's position*. Containers are told `kafka:29092`; processes on
+the host are told `localhost:19092`. One listener could not serve both, because
+`localhost` inside a container means that container.
+
+**Same-origin browser traffic.** The browser cannot resolve Docker service
+names, so the API location could not simply be pointed at `control-api:8080`.
+The frontend image is built with an empty `VITE_API_BASE_URL`, which makes the
+bundle request `/api/v1/...` with no host, and nginx proxies those to the
+Control API inside the network. The alternative — a cross-origin call direct to
+the published port — would have meant widening CORS to make a development
+convenience work. CORS configuration is unchanged.
+
+### Where the SSRF policy is deliberately relaxed
+
+Every address inside a Compose network is private, so `DestinationPolicy` as
+configured for a deployed PulseGuard would refuse to monitor *anything* in the
+stack. Compose therefore sets `MONITOR_ALLOW_PRIVATE_ADDRESSES=true` for the
+worker. This is the same development override described under
+[SSRF protection](#the-development-override); it is local-Compose-only and must
+never be a deployed default. The unconditional cloud-metadata blocklist is not
+affected by it.
+
+### Development infrastructure, not the target architecture
+
+The infrastructure choices here exist to make one laptop reproducible, and are
+replaced later:
+
+| Compose (development) | Later (AWS) |
+| --- | --- |
+| MySQL container, `mysql_data` volume | Amazon RDS for MySQL |
+| Single-node KRaft Kafka, plaintext, no auth | Managed, replicated Kafka |
+| Mailpit | Production SMTP / Amazon SES |
+| Kafka UI | No production role |
+| One replica of each service | Multiple replicas, horizontally scaled |
+| Development credentials in `compose.yaml` | Secret store |
+| Health-check timings sized for a slow laptop | Tightened for real hardware |
+
+Docker is additive. The existing workflow — local MySQL, local Kafka, Spring
+Boot from the IDE, `npm run dev` — is unchanged, and remains the faster loop for
+day-to-day development and the only way the test suites are run.
+
+---
+
 ## Future Architecture
 
 ```text

@@ -1,0 +1,34 @@
+# Keep the build context to what the image actually needs: pom.xml, mvnw,
+# .mvn/ and src/. Everything below is either rebuilt inside the image or has no
+# business being there.
+
+# Build output — the image compiles its own, and a host target/ built on macOS
+# would otherwise be shipped into a Linux container.
+target/
+
+# Version control and IDE metadata
+.git/
+.gitignore
+.gitattributes
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.settings/
+.classpath
+.project
+
+# Local noise
+*.log
+logs/
+.DS_Store
+.env
+.env.*
+
+# API collections are developer tooling, not part of the running service.
+postman/
+
+# Docker's own files: changing this list should not invalidate the build.
+Dockerfile
+.dockerignore
