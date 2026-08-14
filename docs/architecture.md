@@ -762,6 +762,63 @@ day-to-day development and the only way the test suites are run.
 
 ---
 
+## Quality tooling: SonarQube (Stage 13)
+
+SonarQube is **not part of the architecture**. It appears here only so that it
+is unambiguous where it sits — which is entirely outside the runtime, reading
+the source tree rather than participating in it.
+
+```text
+   ┌──────────────────────────────────────────────────────────┐
+   │  DEVELOPMENT / QUALITY TOOLING — no runtime relationship  │
+   │                                                          │
+   │        source tree                                       │
+   │             │                                            │
+   │             ▼                                            │
+   │     tests + coverage                                     │
+   │     JaCoCo (3 backends) · Vitest v8 (frontend, local)    │
+   │             │                                            │
+   │             ▼                                            │
+   │       Sonar scanner for Maven                            │
+   │             │                                            │
+   │             ▼                                            │
+   │        SonarQube  :9000   (--profile quality)            │
+   └──────────────────────────────────────────────────────────┘
+
+   The runtime — frontend, control-api, monitor-worker,
+   notification-service, MySQL, Kafka, Mailpit — has no edge
+   of any kind to this box.
+```
+
+There is deliberately no arrow from any PulseGuard service to SonarQube. No
+service declares `depends_on: sonarqube`, none is configured with its address,
+and SonarQube being stopped or absent has no effect on any of them. The
+scanners run on a developer's machine, read files and a coverage report, and
+talk only to SonarQube.
+
+Three Sonar projects mirror the three backend applications, which is the same
+reason there is no shared Maven parent: aggregating them would misrepresent an
+architecture that is deliberately separate. The frontend is not analysed —
+SonarQube's JavaScript analyzer requires a newer Node than the project is
+pinned to, and the toolchain was not changed to suit a reporting tool.
+
+### It is informational, on purpose
+
+No minimum coverage threshold, no custom Quality Gate, no
+`sonar.qualitygate.wait`, no build blocking. The purpose at this stage is a
+baseline and a dashboard worth reading, not a gate. Whether CI should later
+enforce anything is an open decision, not an assumption baked in here.
+
+Coverage measures the fast automated suites only. Consistent with the Stage 11
+decision, MySQL, Kafka, SMTP and Docker behaviour remain **manually verified**
+— there are no Testcontainers, no H2 and no embedded Kafka anywhere in the
+project, and none were added to raise a number.
+
+SonarQube's own storage — an embedded database in its own volume — is unrelated
+to PulseGuard's MySQL in every respect.
+
+---
+
 ## Future Architecture
 
 ```text
