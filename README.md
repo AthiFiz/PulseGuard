@@ -629,6 +629,39 @@ Full details — first-run setup, job configuration, private-repository
 credentials, the Sonar token, failure behaviour and troubleshooting — are in
 **[docs/jenkins.md](docs/jenkins.md)**.
 
+> This local Jenkins is the CI *proof*, not the delivery mechanism. Deployment
+> runs from an AWS-hosted Jenkins — see below.
+
+---
+
+## Cloud CI/CD
+
+`git push` is the whole workflow. Everything after it happens in AWS:
+
+```text
+git push → GitHub → webhook → Jenkins EC2 → test/build/push/deploy
+                                            ONLY the components that changed
+```
+
+A change under `backend/control-api/**` runs the Control API's tests, builds the
+Control API image, pushes it to ECR and rolls out `deployment/control-api` — and
+does none of those things for the worker, notification service or frontend.
+Documentation-only changes build nothing at all.
+
+The laptop performs no tests, no Docker build, no ECR login and no `kubectl`
+after the push. Images are tagged with the commit SHA, never `:latest`.
+
+```bash
+# Jenkins UI (restricted to one IP at a time)
+open http://54.172.12.167:8080
+
+# moved to a different network? re-point the UI rule — webhooks are unaffected
+./scripts/aws/update-jenkins-ui-ip.sh
+```
+
+Setup, IAM, RBAC, webhook configuration and troubleshooting are in
+**[docs/jenkins-aws.md](docs/jenkins-aws.md)**.
+
 ---
 
 ## AWS EKS Deployment

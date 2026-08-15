@@ -1,0 +1,71 @@
+# What the cloud Jenkins pipeline is allowed to do inside the cluster.
+#
+# The EC2 instance role `PulseGuardJenkinsRole` is mapped by an EKS access entry
+# to the Kubernetes group `pulseguard-deployer`. This Role is everything that
+# group can do, and it is scoped to the `pulseguard` namespace only.
+#
+# WHAT IS DELIBERATELY ABSENT
+# ---------------------------
+# No `secrets` verbs of any kind. The pipeline updates a container image; the
+# running Deployments already reference `pulseguard-secrets` and
+# `pulseguard-smtp-secrets` themselves, and Kubernetes injects them at pod
+# start. Jenkins never needs to see the database password, the JWT signing key
+# or the Gmail App Password — so it is not permitted to read them.
+#
+# That matters because Jenkins is the most exposed component in this system: it
+# is on a public IP, speaks HTTP, and runs code from a Git repository. Limiting
+# the blast radius of a compromised Jenkins to "can restart pods with a
+# different image" rather than "can read every credential in the namespace" is
+# the single most valuable boundary here.
+#
+# Also absent: create and delete on Deployments (the pipeline updates existing
+# ones, it does not define them), anything cluster-scoped, and any access to
+# nodes, namespaces or other namespaces' workloads.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pulseguard-deployer
+  namespace: pulseguard
+rules:
+  # `kubectl set image` and `kubectl rollout undo` both patch the Deployment.
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+
+  # `kubectl rollout status` and `rollout undo` read ReplicaSet history to work
+  # out what "the previous revision" means.
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get", "list", "watch"]
+
+  # Enough to see whether the new pods actually came up, and to read why they
+  # did not when a rollout fails.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+
+  # Rollout failures are usually explained by an Event (ImagePullBackOff,
+  # insufficient memory) long before they are explained by a log line.
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pulseguard-deployer
+  namespace: pulseguard
+subjects:
+  # Supplied by the EKS access entry for PulseGuardJenkinsRole. There is no
+  # ServiceAccount and no token: the EC2 instance role authenticates to the
+  # cluster directly, so there is no long-lived credential to leak or rotate.
+  - kind: Group
+    name: pulseguard-deployer
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: Role
+  name: pulseguard-deployer
+  apiGroup: rbac.authorization.k8s.io

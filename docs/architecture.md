@@ -876,6 +876,52 @@ Correctness over build time, until the hardware justifies otherwise.
 
 ---
 
+## Delivery view: cloud CI/CD (Stage 18)
+
+How code reaches the cluster. The defining property is that **only what changed
+is processed** — a Control API commit never rebuilds the frontend or restarts
+the worker.
+
+```text
+   developer
+       │ git push
+       ▼
+    GitHub
+       │ webhook (push events, main only)
+       ▼
+ ┌──────────────────────────────┐
+ │  Jenkins EC2, public subnet  │   t3.medium, instance role, no AWS keys
+ │                              │
+ │   detect changed paths       │   backend/control-api/**  → control-api
+ │            │                 │   backend/monitor-worker/** → monitor-worker
+ │            ▼                 │   backend/notification-service/** → …
+ │   test  ─ only changed       │   frontend/**             → frontend
+ │            │                 │
+ │   build ─ only changed       │
+ │            │                 │
+ │   push  ─ only changed ──────┼──▶  Amazon ECR   (SHA tag, never :latest)
+ │            │                 │
+ │   kubectl set image ─────────┼──▶  private EKS  (namespace pulseguard)
+ └──────────────────────────────┘          │
+                                            ▼
+                                   rollout status, or
+                                   rollout undo + FAIL
+```
+
+After `git push`, the laptop does nothing further: no tests, no Docker build,
+no ECR login, no `kubectl`. That independence is the point of the stage.
+
+Jenkins holds an EC2 instance role rather than AWS keys, its ECR permissions
+name four repositories explicitly, and its Kubernetes access is a namespace Role
+with **no Secret access at all** — an image swap does not require knowing the
+database password.
+
+The Task 14 Jenkins in Docker Compose remains in the repository as the local CI
+artifact it always was. It cannot serve this purpose because it only exists when
+the laptop is on.
+
+---
+
 ## Deployment view: AWS EKS (Stage 16)
 
 Docker Compose remains the complete environment. EKS is a second deployment of
