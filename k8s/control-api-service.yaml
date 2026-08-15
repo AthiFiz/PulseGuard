@@ -1,0 +1,21 @@
+# ClusterIP, deliberately. The Control API is never exposed to the internet:
+# the only public entry point to PulseGuard is the ALB in front of the
+# frontend, and the frontend's nginx proxies /api here from inside the cluster.
+#
+# The ClusterIP is also what makes the frontend's literal `proxy_pass` safe —
+# this address outlives any individual control-api pod.
+apiVersion: v1
+kind: Service
+metadata:
+  name: control-api
+  namespace: pulseguard
+  labels:
+    app: control-api
+spec:
+  type: ClusterIP
+  selector:
+    app: control-api
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

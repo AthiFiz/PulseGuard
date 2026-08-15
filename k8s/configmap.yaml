@@ -1,0 +1,35 @@
+# Non-secret runtime configuration.
+#
+# Nothing in here is sensitive: the RDS hostname is not a credential, and the
+# database is unreachable without one. Credentials live in the Secret
+# `pulseguard-secrets`, which is created at deploy time and never committed.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pulseguard-config
+  namespace: pulseguard
+data:
+  # connectionTimeZone/preserveInstants keep Instant values round-tripping as
+  # true UTC regardless of the RDS server's or the JVM's local zone. These are
+  # the same parameters Docker Compose uses; only the host differs.
+  DB_URL: "jdbc:mysql://pulseguard-mysql.cc5sk4k4err6.us-east-1.rds.amazonaws.com:3306/pulseguard?connectionTimeZone=UTC&preserveInstants=true"
+
+  # The browser reaches the API through the frontend's nginx on the same
+  # origin, so no cross-origin request is ever made and this value is not
+  # load-bearing in this deployment. It is set to the ALB rather than left
+  # blank so that a direct API call from the same host is not rejected.
+  FRONTEND_ORIGIN: "http://k8s-pulsegua-frontend-placeholder"
+
+  # ---------------------------------------------------------------------
+  # SSRF policy — the single most important difference from local Docker
+  # ---------------------------------------------------------------------
+  # Compose sets this to `true` because every address inside a Compose network
+  # is private, so a monitoring demo would otherwise have nothing it is allowed
+  # to check. That reasoning does not survive contact with a real VPC: here,
+  # private addresses are the RDS instance, the Kubernetes API, the other pods
+  # and the rest of 10.0.0.0/16. A monitor URL pointing at any of them must be
+  # refused.
+  #
+  # Cloud metadata endpoints are blocked unconditionally in DestinationPolicy
+  # and do not depend on this setting.
+  MONITOR_ALLOW_PRIVATE_ADDRESSES: "false"

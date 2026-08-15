@@ -876,6 +876,83 @@ Correctness over build time, until the hardware justifies otherwise.
 
 ---
 
+## Deployment view: AWS EKS (Stage 16)
+
+Docker Compose remains the complete environment. EKS is a second deployment of
+the *same images*, with a different network shape around them: everything that
+runs application code sits in private subnets, and exactly one public component
+exists.
+
+```text
+                            Internet
+                                │
+                                │  HTTP :80
+                                ▼
+                ┌───────────────────────────────┐
+                │  Application Load Balancer     │   PUBLIC subnets
+                │  internet-facing, 2 AZs        │   10.0.0.0/20 · 10.0.16.0/20
+                └───────────────┬───────────────┘
+                                │  target-type: ip
+                                ▼
+        ┌───────────────────────────────────────────────┐
+        │              EKS pods                          │  PRIVATE subnets
+        │                                                │  10.0.128.0/20
+        │   ┌──────────┐   /api   ┌─────────────────┐    │  10.0.144.0/20
+        │   │ frontend │ ───────▶ │   control-api   │    │
+        │   │  nginx   │          │   (ClusterIP)   │    │
+        │   └──────────┘          └────────┬────────┘    │
+        │                                  │             │
+        │   ┌────────────────┐             │             │
+        │   │ monitor-worker │─────────────┤             │
+        │   │  replicas: 1   │             │             │
+        │   └────────────────┘             │             │
+        │                                  │             │
+        │   ┌──────────────────────┐       │             │
+        │   │ notification-service │       │             │
+        │   │     replicas: 0      │       │             │
+        │   └──────────────────────┘       │             │
+        └──────────────────────────────────┼─────────────┘
+                                           │ 3306
+                                           ▼
+                              ┌─────────────────────────┐
+                              │   Amazon RDS MySQL      │  PRIVATE subnets
+                              │   PubliclyAccessible    │  no public IP
+                              │        = false          │  SG source: EKS SG
+                              └─────────────────────────┘
+
+  Outbound only — image pulls, EKS registration, monitored endpoints:
+
+        private EKS nodes ──▶ NAT Gateway ──▶ Internet Gateway ──▶ Internet
+                              (public subnet A, one only)
+```
+
+### What is deliberately absent
+
+**No Kafka.** Amazon MSK was dropped on cost and no broker runs in the cluster.
+The worker treats an unreachable broker as non-fatal, so monitoring, incidents
+and `outbox_events` all work in EKS — the outbox simply accumulates unpublished
+rows. The full incident → Kafka → email path is demonstrated on Compose, not
+here, and `notification-service` therefore runs at zero replicas.
+
+**No NodePort and no public node IPs.** The ALB registers pod IPs directly
+(`target-type: ip`), so nothing needs to listen on a node address. The worker
+node has no public IPv4 at all and reaches the internet only outbound, through
+the NAT Gateway.
+
+**No HTTPS.** HTTP only, no ACM certificate and no domain. Production would
+require both; a three-day demonstration behind an IP-restricted ALB does not.
+
+### The one configuration that must differ from Compose
+
+`MONITOR_ALLOW_PRIVATE_ADDRESSES` is `true` in Compose and **`false`** here.
+The Compose value exists because every address on a Compose network is private,
+so the SSRF policy would otherwise refuse to monitor anything at all locally.
+In a real VPC that same setting would let a monitor URL reach RDS, the
+Kubernetes API and every pod. The application already defaults to `false`;
+Compose is the exception, not EKS.
+
+---
+
 ## Future Architecture
 
 ```text

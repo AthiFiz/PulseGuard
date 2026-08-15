@@ -1,0 +1,81 @@
+# Kubernetes replacement for the nginx server block baked into the frontend
+# image (frontend/nginx/default.conf).
+#
+# WHY THIS EXISTS
+# ---------------
+# The image's own config is written for Docker Compose and contains one line
+# that cannot work here:
+#
+#     resolver 127.0.0.11 valid=10s ipv6=off;
+#
+# 127.0.0.11 is Docker's embedded DNS server. It does not exist in a
+# Kubernetes pod, so every /api/ request would fail to resolve its upstream and
+# return 502. The image is deliberately NOT rebuilt to fix this — mounting a
+# different config is deployment configuration, not an application change.
+#
+# The Docker config also routes through a variable to force per-request
+# re-resolution, because Compose may hand a replaced container a new IP. That
+# reasoning does not apply in Kubernetes: `control-api` resolves to a Service
+# ClusterIP, which is stable for the life of the Service and does not change
+# when pods are replaced or rescheduled. A literal proxy_pass, resolved once at
+# startup through the pod's /etc/resolv.conf, is therefore both simpler and
+# correct here.
+#
+# Everything else — the /api prefix, forwarded headers, timeouts, asset
+# caching, SPA fallback — is preserved exactly as the image has it.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: frontend-nginx-config
+  namespace: pulseguard
+data:
+  default.conf: |
+    server {
+        listen 80;
+        server_name _;
+
+        root /usr/share/nginx/html;
+        index index.html;
+
+        server_tokens off;
+
+        # ------------------------------------------------------------------
+        # API — reverse proxied so the browser only ever sees one origin
+        # ------------------------------------------------------------------
+        # Resolved once at startup via the pod's cluster DNS. The target is a
+        # Service ClusterIP, which outlives any individual control-api pod.
+        location /api/ {
+            proxy_pass http://control-api:8080;
+
+            proxy_http_version 1.1;
+            proxy_set_header Host              $host;
+            proxy_set_header X-Real-IP         $remote_addr;
+            proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+
+            proxy_connect_timeout 5s;
+            proxy_send_timeout    30s;
+            proxy_read_timeout    30s;
+        }
+
+        # ------------------------------------------------------------------
+        # Static assets — content-hashed by Vite, so safe to cache forever
+        # ------------------------------------------------------------------
+        location /assets/ {
+            expires 1y;
+            add_header Cache-Control "public, immutable";
+            try_files $uri =404;
+        }
+
+        # index.html names the current hashed bundles, so it must not be cached.
+        location = /index.html {
+            add_header Cache-Control "no-cache";
+        }
+
+        # ------------------------------------------------------------------
+        # SPA fallback — React Router owns the URL space
+        # ------------------------------------------------------------------
+        location / {
+            try_files $uri $uri/ /index.html;
+        }
+    }

@@ -1,0 +1,77 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: pulseguard
+  labels:
+    app: frontend
+    app.kubernetes.io/part-of: pulseguard
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: frontend
+  template:
+    metadata:
+      labels:
+        app: frontend
+    spec:
+      containers:
+        - name: frontend
+          # NOTE THE TAG. `4970e68-patched` is the image rebuilt after ECR
+          # scan-on-push reported 1 CRITICAL and 15 HIGH CVEs in the original
+          # `4970e68` — all of them in OS packages of a stale nginx base layer.
+          # The rebuilt image re-scanned clean (0 findings of any severity).
+          # The vulnerable image still exists in ECR under the plain `4970e68`
+          # tag; it must not be deployed.
+          image: 423151037862.dkr.ecr.us-east-1.amazonaws.com/pulseguard-frontend:4970e68-patched
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 80
+          volumeMounts:
+            # Replaces the image's Docker-oriented server block, whose
+            # `resolver 127.0.0.11` does not exist outside Docker. See
+            # frontend-nginx-configmap.yaml for the full reasoning.
+            - name: nginx-config
+              mountPath: /etc/nginx/conf.d/default.conf
+              subPath: default.conf
+              readOnly: true
+          securityContext:
+            # No runAsNonRoot here, unlike the Java services: stock nginx
+            # starts its master process as root in order to bind port 80, then
+            # drops its workers to the unprivileged `nginx` user itself.
+            # Forcing non-root would need the nginx-unprivileged image and a
+            # port change — a real improvement, but an image change, which this
+            # task deliberately avoids.
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              # Restored solely so the master process can bind :80.
+              add: ["NET_BIND_SERVICE", "CHOWN", "SETUID", "SETGID"]
+          resources:
+            requests:
+              memory: "32Mi"
+              cpu: "20m"
+            limits:
+              memory: "128Mi"
+          # Serving static files needs no startupProbe — nginx is ready in
+          # under a second, unlike the JVM services.
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            timeoutSeconds: 3
+      volumes:
+        - name: nginx-config
+          configMap:
+            name: frontend-nginx-config
