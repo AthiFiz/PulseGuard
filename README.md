@@ -664,6 +664,34 @@ Setup, IAM, RBAC, webhook configuration and troubleshooting are in
 
 ---
 
+## Observability
+
+PulseGuard monitors other people's APIs; Prometheus and Grafana monitor
+PulseGuard. Both run inside the existing EKS cluster — no new AWS resource, no
+public endpoint.
+
+```text
+Control API ┐
+Worker      ├─ /actuator/prometheus ─▶ Prometheus ─▶ Grafana
+Notification┘                          24h retention   "PulseGuard Overview"
+Kubernetes ─┘
+```
+
+```bash
+kubectl port-forward -n monitoring svc/pulseguard-monitoring-grafana 3000:80
+# then http://localhost:3000 → Dashboards → PulseGuard Overview
+```
+
+The dashboard shows service health, HTTP rate and latency, JVM memory and CPU,
+monitor checks by outcome, incident open/resolve activity, email delivery, and
+Kubernetes pod and node resources.
+
+Grafana and Prometheus are `ClusterIP` only and reached by port-forward — there
+is deliberately no second load balancer. Full detail in
+**[docs/observability.md](docs/observability.md)**.
+
+---
+
 ## AWS EKS Deployment
 
 PulseGuard also runs on Amazon EKS. It is a second deployment of the **same

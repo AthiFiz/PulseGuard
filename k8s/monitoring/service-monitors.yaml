@@ -1,0 +1,75 @@
+# What Prometheus scrapes, expressed as intent rather than as scrape config.
+#
+# A ServiceMonitor says "scrape whatever matches these labels, on this port, at
+# this path". The Prometheus Operator watches for these objects and regenerates
+# Prometheus's configuration itself, so nothing here edits prometheus.yml and a
+# new service becomes observable by adding a manifest rather than by reloading
+# a config file.
+#
+# These live in the `pulseguard` namespace, next to what they describe.
+# Prometheus is configured (in values.yaml) to look across all namespaces, so
+# there is no need to keep them beside Prometheus itself.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: control-api
+  namespace: pulseguard
+  labels:
+    app.kubernetes.io/part-of: pulseguard
+spec:
+  namespaceSelector:
+    matchNames: ["pulseguard"]
+  selector:
+    matchLabels:
+      app: control-api
+  endpoints:
+    - port: http
+      path: /actuator/prometheus
+      # 30s is plenty. This is a four-pod system on one node, and scraping
+      # every second would cost more CPU than the thing being measured.
+      interval: 30s
+      # Comfortably under the interval, so a slow scrape is abandoned before
+      # the next one begins rather than overlapping with it.
+      scrapeTimeout: 10s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: monitor-worker
+  namespace: pulseguard
+  labels:
+    app.kubernetes.io/part-of: pulseguard
+spec:
+  namespaceSelector:
+    matchNames: ["pulseguard"]
+  selector:
+    matchLabels:
+      # The metrics Service, not the Deployment: monitor-worker has no other
+      # Service, and this one exists specifically to be scraped.
+      app.kubernetes.io/name: monitor-worker
+      pulseguard.io/scrape: "true"
+  endpoints:
+    - port: http
+      path: /actuator/prometheus
+      interval: 30s
+      scrapeTimeout: 10s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: notification-service
+  namespace: pulseguard
+  labels:
+    app.kubernetes.io/part-of: pulseguard
+spec:
+  namespaceSelector:
+    matchNames: ["pulseguard"]
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: notification-service
+      pulseguard.io/scrape: "true"
+  endpoints:
+    - port: http
+      path: /actuator/prometheus
+      interval: 30s
+      scrapeTimeout: 10s

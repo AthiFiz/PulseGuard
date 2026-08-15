@@ -11,6 +11,7 @@ import com.pulseguard.monitorworker.repository.MonitorCheckRepository;
 import com.pulseguard.monitorworker.repository.MonitorRepository;
 import java.time.Duration;
 import java.util.Optional;
+import com.pulseguard.monitorworker.metrics.WorkerMetrics;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -38,6 +39,7 @@ public class MonitorResultService {
     private final MonitorCheckRepository monitorCheckRepository;
     private final IncidentRepository incidentRepository;
     private final IncidentEventRecorder incidentEventRecorder;
+    private final WorkerMetrics metrics;
 
     @Transactional
     public void recordResult(Long monitorId, HealthCheckResult result) {
@@ -62,6 +64,10 @@ public class MonitorResultService {
                 result.responseTimeMs(),
                 result.errorType(),
                 result.errorMessage()));
+
+        // Counted here rather than at the HTTP call, so the number always
+        // matches what is actually in monitor_checks.
+        metrics.checkRecorded(result.outcome());
 
         if (monitor.getCurrentStatus() == MonitorStatus.PAUSED) {
             // Someone paused it while the request was running. The check itself
@@ -151,6 +157,7 @@ public class MonitorResultService {
         incident.resolve(check.getCheckedAt(), check.getId());
         incidentRepository.save(incident);
         incidentEventRecorder.recordIncidentResolved(monitor, incident, check);
+        metrics.incidentResolved();
 
         log.info(
                 "Incident resolved: incidentId={}, monitorId={}, name={}, openedAt={}, resolvedAt={}",
@@ -184,6 +191,7 @@ public class MonitorResultService {
         Incident incident = incidentRepository.save(
                 new Incident(monitor.getId(), check.getCheckedAt(), check.getId()));
         incidentEventRecorder.recordIncidentOpened(monitor, incident, check);
+        metrics.incidentOpened();
 
         log.info(
                 "Incident opened: incidentId={}, monitorId={}, name={}, openedAt={}",

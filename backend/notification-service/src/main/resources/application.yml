@@ -65,7 +65,17 @@ management:
   endpoints:
     web:
       exposure:
-        include: health
+        # health + prometheus, and nothing else. Deliberately not "*": that
+        # would also publish /actuator/env, /configprops, /beans and
+        # /heapdump, which leak configuration and can dump the whole JVM
+        # heap — including secrets held in memory.
+        include: health,prometheus
+  metrics:
+    tags:
+      # Every metric from this process carries application=<name>, so a
+      # single Prometheus query can separate the three backends without
+      # relying on pod names that change on every rollout.
+      application: pulseguard-notification-service
   health:
     mail:
       # Deliberately off. Boot's mail health check opens an SMTP connection on

@@ -68,6 +68,19 @@ public class SecurityConfig {
                         // change would need to do to use the groups instead.
                         .requestMatchers(HttpMethod.GET, "/api/v1/system/info", "/actuator/health")
                         .permitAll()
+                        // Prometheus scrapes this on a schedule and has no way
+                        // to hold a JWT, so it has to be reachable without one.
+                        //
+                        // The exposure that buys is bounded: the Service is
+                        // ClusterIP, so only something already inside the
+                        // cluster can reach port 8080 at all. Note this matcher
+                        // is the exact path — "/api/actuator/prometheus", which
+                        // is what the frontend's nginx would forward from the
+                        // public ALB, does not match it and stays refused.
+                        // nginx also blocks that prefix outright, so the
+                        // protection does not rest on this subtlety alone.
+                        .requestMatchers(HttpMethod.GET, "/actuator/prometheus")
+                        .permitAll()
                         // CORS preflight carries no credentials and must not 401.
                         .requestMatchers(HttpMethod.OPTIONS, "/**")
                         .permitAll()

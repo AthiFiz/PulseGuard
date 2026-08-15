@@ -16,6 +16,8 @@ import com.pulseguard.notification.domain.NotificationDelivery;
 import com.pulseguard.notification.enums.NotificationChannel;
 import com.pulseguard.notification.enums.NotificationDeliveryStatus;
 import com.pulseguard.notification.repository.NotificationDeliveryRepository;
+import com.pulseguard.notification.metrics.NotificationMetrics;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -66,7 +68,10 @@ class EmailDeliveryServiceTest {
                         50,
                         MAX_ATTEMPTS,
                         RETRY_DELAY),
-                Clock.fixed(NOW, ZoneOffset.UTC));
+                Clock.fixed(NOW, ZoneOffset.UTC),
+                // Real registry, not a mock: the counters cost nothing and a
+                // real one catches a duplicate registration at test time.
+                new NotificationMetrics(new SimpleMeterRegistry()));
     }
 
     // -------------------------------------------------------------- success

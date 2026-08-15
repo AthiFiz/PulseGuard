@@ -554,6 +554,39 @@ temporary Kafka CLI pod inside the cluster — see [`msk.md`](msk.md).
 
 ---
 
+## The monitoring namespace (Stage 19)
+
+A second namespace runs the observability stack, deliberately separate from
+`pulseguard` so the two can be deleted independently.
+
+```text
+namespace  monitoring
+release    pulseguard-monitoring  (kube-prometheus-stack 88.3.0)
+pods       prometheus · grafana · operator · kube-state-metrics · node-exporter
+access     kubectl port-forward only — no Ingress, no LoadBalancer
+```
+
+Two extra `ClusterIP` Services live in `pulseguard`:
+`monitor-worker-metrics` and `notification-service-metrics`. Neither service
+takes application traffic, so neither had a Service before; these exist purely so
+Prometheus has a target. Three `ServiceMonitor` objects sit beside them.
+
+```bash
+kubectl get pods -n monitoring
+kubectl get servicemonitors -n pulseguard
+
+kubectl port-forward -n monitoring svc/pulseguard-monitoring-grafana 3000:80
+kubectl port-forward -n monitoring svc/pulseguard-monitoring-kube-prometheus 9090:9090
+```
+
+**Jenkins cannot touch any of this.** The Task 18 deployment Role is scoped to
+the `pulseguard` namespace, so the monitoring stack is installed by hand — which
+also means a dashboard change can never restart the API.
+
+Full detail in [`observability.md`](observability.md).
+
+---
+
 ## Security posture
 
 | Control | State |

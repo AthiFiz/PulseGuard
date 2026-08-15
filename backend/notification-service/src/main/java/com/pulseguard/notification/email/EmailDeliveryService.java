@@ -7,6 +7,7 @@ import com.pulseguard.notification.repository.NotificationDeliveryRepository;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.List;
+import com.pulseguard.notification.metrics.NotificationMetrics;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Limit;
@@ -35,6 +36,7 @@ public class EmailDeliveryService {
     private final JavaMailSender mailSender;
     private final NotificationProperties notificationProperties;
     private final Clock clock;
+    private final NotificationMetrics metrics;
 
     /**
      * One delivery cycle.
@@ -78,6 +80,7 @@ public class EmailDeliveryService {
             // permits — not that anyone received or read it.
             delivery.markSent(Instant.now(clock));
             notificationDeliveryRepository.save(delivery);
+            metrics.sent();
 
             log.info(
                     "Notification email sent: deliveryId={}, eventId={}, incidentId={}, attempt={}",
@@ -100,6 +103,7 @@ public class EmailDeliveryService {
         notificationDeliveryRepository.save(delivery);
 
         if (delivery.getStatus() == NotificationDeliveryStatus.FAILED) {
+            metrics.failedPermanently();
             // Out of attempts. The row stays for inspection rather than being
             // deleted, and nothing will retry it automatically again.
             log.error(
@@ -109,6 +113,7 @@ public class EmailDeliveryService {
                     delivery.getEventId(),
                     describe(cause));
         } else {
+            metrics.retrying();
             log.warn(
                     "Notification email attempt {} failed, retrying at {}: deliveryId={}, reason={}",
                     delivery.getAttemptCount(),
