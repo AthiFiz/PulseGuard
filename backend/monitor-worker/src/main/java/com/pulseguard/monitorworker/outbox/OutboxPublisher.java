@@ -8,6 +8,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import com.pulseguard.monitorworker.metrics.WorkerMetrics;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Limit;
@@ -34,6 +35,7 @@ import org.springframework.stereotype.Service;
 public class OutboxPublisher {
 
     private final OutboxEventRepository outboxEventRepository;
+    private final WorkerMetrics metrics;
     private final KafkaTemplate<String, String> kafkaTemplate;
     private final KafkaProperties kafkaProperties;
     private final Clock clock;
@@ -97,6 +99,7 @@ public class OutboxPublisher {
     private void markPublished(OutboxEvent event) {
         event.markPublished(Instant.now(clock));
         outboxEventRepository.save(event);
+        metrics.outboxPublished(true);
 
         log.info(
                 "Outbox event published: eventId={}, eventType={}, aggregateId={}, key={}",
@@ -115,6 +118,7 @@ public class OutboxPublisher {
     private void markFailed(OutboxEvent event, Exception cause) {
         event.markFailed(Instant.now(clock), describe(cause));
         outboxEventRepository.save(event);
+        metrics.outboxPublished(false);
 
         log.warn(
                 "Outbox publish failed: eventId={}, eventType={}, attempt={}, reason={}",

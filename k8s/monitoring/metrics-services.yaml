@@ -1,0 +1,52 @@
+# Internal Services that exist so Prometheus has something to scrape.
+#
+# The Control API already has a Service — the frontend's nginx proxies /api to
+# it — so it needs nothing here. The Monitor Worker and Notification Service
+# have never had one: neither accepts application traffic, so there was nothing
+# to route to them. Prometheus discovers targets through Services, though, so
+# each needs one now.
+#
+# Both are ClusterIP and both exist purely for metrics. Nothing outside the
+# cluster can reach them: there is no Ingress, no NodePort and no load
+# balancer. The ALB routes only to the frontend.
+apiVersion: v1
+kind: Service
+metadata:
+  name: monitor-worker-metrics
+  namespace: pulseguard
+  labels:
+    app: monitor-worker
+    app.kubernetes.io/name: monitor-worker
+    app.kubernetes.io/part-of: pulseguard
+    # The ServiceMonitor selects on this, so a Service without it is simply
+    # not scraped — which is the intended default for anything new.
+    pulseguard.io/scrape: "true"
+spec:
+  type: ClusterIP
+  selector:
+    app: monitor-worker
+  ports:
+    # Named `http` because the ServiceMonitor refers to the port by name.
+    # Referring by number breaks silently if the container port ever moves.
+    - name: http
+      port: 8081
+      targetPort: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: notification-service-metrics
+  namespace: pulseguard
+  labels:
+    app: notification-service
+    app.kubernetes.io/name: notification-service
+    app.kubernetes.io/part-of: pulseguard
+    pulseguard.io/scrape: "true"
+spec:
+  type: ClusterIP
+  selector:
+    app: notification-service
+  ports:
+    - name: http
+      port: 8082
+      targetPort: http

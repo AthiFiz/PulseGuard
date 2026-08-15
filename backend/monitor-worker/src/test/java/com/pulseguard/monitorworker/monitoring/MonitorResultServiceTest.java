@@ -30,7 +30,10 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
+import com.pulseguard.monitorworker.metrics.WorkerMetrics;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.mockito.InjectMocks;
+import org.mockito.Spy;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -66,6 +69,14 @@ class MonitorResultServiceTest {
 
     @Mock
     private IncidentEventRecorder incidentEventRecorder;
+
+    /**
+     * A real instance rather than a mock. The counters are in-memory and free,
+     * and using the real one means these tests would catch a metrics change
+     * that throws — which must never be able to break monitor processing.
+     */
+    @Spy
+    private WorkerMetrics workerMetrics = new WorkerMetrics(new SimpleMeterRegistry());
 
     @InjectMocks
     private MonitorResultService monitorResultService;

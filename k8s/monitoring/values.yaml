@@ -1,0 +1,151 @@
+# kube-prometheus-stack values for PulseGuard.
+#
+# Every deviation from the chart defaults exists for one of two reasons: the
+# cluster is a single t3.medium, or the environment is short-lived. Both are
+# stated where they apply.
+#
+# NO SECRETS IN THIS FILE. The Grafana admin password is supplied at install
+# time from a Secret, never committed here.
+
+# ---------------------------------------------------------------------------
+# Alertmanager — off
+# ---------------------------------------------------------------------------
+# Nothing would receive its alerts: no email routing, no Slack, no PagerDuty,
+# and deliberately so. Running it anyway would consume memory on a node that
+# has little to spare in order to deliver notifications to nowhere.
+#
+# PulseGuard already demonstrates incident notification — that is what the
+# product does. This stack is here to make the system visible, not to alert on
+# it.
+alertmanager:
+  enabled: false
+
+# ---------------------------------------------------------------------------
+# Prometheus
+# ---------------------------------------------------------------------------
+prometheus:
+  prometheusSpec:
+    # 24 hours. Long enough to show a full day on a dashboard, short enough
+    # that memory stays bounded on a node shared with four application pods.
+    retention: 24h
+
+    # No PersistentVolumeClaim. Metrics live in the pod's ephemeral storage and
+    # are lost if it restarts, which is acceptable for an environment measured
+    # in days: an EBS volume would add cost and one more thing to clean up, to
+    # protect data nobody will read next week.
+    storageSpec: {}
+
+    resources:
+      requests:
+        cpu: 100m
+        memory: 400Mi
+      limits:
+        # No CPU limit: throttling Prometheus during a scrape makes it slow at
+        # exactly the moment it has work to do. The memory limit is the real
+        # protection, and it is what stops a runaway series count taking the
+        # node down with it.
+        memory: 900Mi
+
+    # ------------------------------------------------------------------
+    # Discover PulseGuard's own ServiceMonitors
+    # ------------------------------------------------------------------
+    # By default the chart only picks up ServiceMonitors carrying its own
+    # release label. PulseGuard's live in the `pulseguard` namespace and are
+    # not chart-managed, so that default would silently ignore them — the
+    # single most common reason a Spring Boot service never appears as a
+    # target.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    serviceMonitorNamespaceSelector: {}
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+
+# ---------------------------------------------------------------------------
+# Grafana
+# ---------------------------------------------------------------------------
+grafana:
+  # ClusterIP only. Reached with `kubectl port-forward`, never through a load
+  # balancer: a second ALB would add a public endpoint, another public IPv4
+  # charge and another thing to secure, to serve dashboards to one person.
+  service:
+    type: ClusterIP
+
+  # Dashboards are provisioned from ConfigMaps in source control, so there is
+  # nothing in Grafana's own storage worth keeping across a restart.
+  persistence:
+    enabled: false
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 400Mi
+
+  # The sidecar watches for ConfigMaps labelled `grafana_dashboard: "1"` and
+  # loads them, which is how PulseGuard Overview arrives without anyone
+  # building it in the UI.
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      # Watch every namespace, so a dashboard can live beside the thing it
+      # describes rather than being forced into `monitoring`.
+      searchNamespace: ALL
+    datasources:
+      enabled: true
+
+  grafana.ini:
+    auth.anonymous:
+      # No anonymous access, even read-only. This is reached through a
+      # port-forward by one operator; there is no audience for it.
+      enabled: false
+    users:
+      allow_sign_up: false
+    analytics:
+      reporting_enabled: false
+      check_for_updates: false
+
+# ---------------------------------------------------------------------------
+# Cluster-level exporters
+# ---------------------------------------------------------------------------
+# Left near their defaults. These are what make pod restarts, node memory and
+# container CPU visible at all — disabling them to save a few MiB would remove
+# most of the reason to run this stack.
+kube-state-metrics:
+  resources:
+    requests:
+      cpu: 10m
+      memory: 48Mi
+    limits:
+      memory: 128Mi
+
+prometheus-node-exporter:
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      memory: 64Mi
+
+prometheusOperator:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 200Mi
+
+# ---------------------------------------------------------------------------
+# Control-plane scrape targets that do not exist on EKS
+# ---------------------------------------------------------------------------
+# EKS runs and hides the control plane. These components have no endpoints a
+# customer can reach, so leaving them enabled produces targets that are
+# permanently DOWN — noise that makes a genuinely broken target harder to spot.
+kubeEtcd:
+  enabled: false
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeProxy:
+  enabled: false

@@ -16,6 +16,8 @@ import com.pulseguard.monitorworker.domain.OutboxEvent;
 import com.pulseguard.monitorworker.enums.OutboxAggregateType;
 import com.pulseguard.monitorworker.enums.OutboxEventType;
 import com.pulseguard.monitorworker.repository.OutboxEventRepository;
+import com.pulseguard.monitorworker.metrics.WorkerMetrics;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -57,8 +59,12 @@ class OutboxPublisherTest {
 
     @BeforeEach
     void setUp() {
+        // A real registry rather than a mock: the counters are cheap, and a
+        // real one would surface a duplicate-registration mistake here instead
+        // of at runtime.
         publisher = new OutboxPublisher(
                 outboxEventRepository,
+                new WorkerMetrics(new SimpleMeterRegistry()),
                 kafkaTemplate,
                 new KafkaProperties(TOPIC, 3, (short) 1, Duration.ofSeconds(5), 50, Duration.ofSeconds(10)),
                 Clock.fixed(NOW, ZoneOffset.UTC));

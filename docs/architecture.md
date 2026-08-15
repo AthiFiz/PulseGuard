@@ -876,6 +876,39 @@ Correctness over build time, until the hardware justifies otherwise.
 
 ---
 
+## Observability view (Stage 19)
+
+Prometheus scrapes; it is never scraped *by* the application. Nothing in the
+runtime path depends on it, and deleting the whole `monitoring` namespace leaves
+PulseGuard working exactly as before.
+
+```text
+   Control API ──────┐
+   Monitor Worker ───┤   /actuator/prometheus   (ClusterIP, never public)
+   Notification ─────┤
+                     ├────▶  Prometheus  ────▶  Grafana
+   kube-state-metrics┤        24h, in-memory     "PulseGuard Overview"
+   node-exporter ────┘                            port-forward only
+```
+
+Micrometer was already collecting HTTP, JVM, GC and pool metrics — Actuator
+brings it in. Stage 19 added the Prometheus *registry* so those can be rendered
+for scraping, plus five counters describing what PulseGuard is actually for:
+checks executed, incidents opened and resolved, outbox events published, and
+email delivered.
+
+Those counters carry only low-cardinality labels — an outcome, a status. No
+monitor id, project id, URL or email address is ever a label: Prometheus creates
+a series per label combination, and identifiers belong in the database and the
+logs, not in a metric.
+
+The metrics endpoint is unauthenticated because Prometheus cannot hold a JWT.
+Two independent controls keep it private: nginx returns 404 for
+`/api/actuator/`, and Spring Security permits only the exact path
+`/actuator/prometheus`, which the proxied path does not match.
+
+---
+
 ## Delivery view: cloud CI/CD (Stage 18)
 
 How code reaches the cluster. The defining property is that **only what changed

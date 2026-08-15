@@ -40,6 +40,26 @@ data:
         server_tokens off;
 
         # ------------------------------------------------------------------
+        # Management endpoints are never public
+        # ------------------------------------------------------------------
+        # This block must come before the /api/ proxy below, because nginx
+        # prefers the longest matching prefix and this one is longer.
+        #
+        # It exists because the proxy below passes the ORIGINAL request URI
+        # through unchanged, so a request for /api/actuator/prometheus arrives
+        # at the Control API as /api/actuator/prometheus and is answered by
+        # Spring rather than by nginx. Spring Security refuses it today —
+        # verified, it returns 401 — but that refusal depends on a matcher not
+        # matching, which is a thin thing to rest on when the alternative is
+        # publishing JVM internals and request statistics to the internet.
+        #
+        # Prometheus reaches /actuator/prometheus directly on the ClusterIP
+        # Service, inside the cluster, and never through this path.
+        location /api/actuator/ {
+            return 404;
+        }
+
+        # ------------------------------------------------------------------
         # API — reverse proxied so the browser only ever sees one origin
         # ------------------------------------------------------------------
         # Resolved once at startup via the pod's cluster DNS. The target is a
