@@ -41,6 +41,16 @@ RUN npm run build
 # ---------------------------------------------------------------------------
 FROM nginx:1.29-alpine AS runtime
 
+# The published nginx:1.29-alpine tag is rebuilt far less often than Alpine
+# patches its packages, so a freshly pulled base still ships known-vulnerable
+# openssl, curl, expat, libxml2 and nghttp2. Upgrading here picks up those fixes
+# at build time — `--pull` alone does not, because the tag itself is unchanged.
+#
+# The cost is that the exact package set depends on when the image was built.
+# That is the accepted trade: pinning versions instead would freeze this image
+# on today's CVEs the moment Alpine moves on.
+RUN apk upgrade --no-cache
+
 # Replaces the image's default server block, which has no SPA fallback and no
 # knowledge of the Control API.
 COPY nginx/default.conf /etc/nginx/conf.d/default.conf
