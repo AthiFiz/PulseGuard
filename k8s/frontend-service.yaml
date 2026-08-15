@@ -1,0 +1,21 @@
+# ClusterIP even though this is the public-facing component.
+#
+# With `alb.ingress.kubernetes.io/target-type: ip` the ALB registers pod IPs
+# directly as targets and reaches them inside the VPC, so it never needs a
+# NodePort. That keeps the node closed: no port range opened on the instance,
+# nothing listening on a node address, and the ALB as the single public entry.
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: pulseguard
+  labels:
+    app: frontend
+spec:
+  type: ClusterIP
+  selector:
+    app: frontend
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

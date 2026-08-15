@@ -1,0 +1,102 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: control-api
+  namespace: pulseguard
+  labels:
+    app: control-api
+    app.kubernetes.io/part-of: pulseguard
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: control-api
+  template:
+    metadata:
+      labels:
+        app: control-api
+    spec:
+      securityContext:
+        # runAsUser is required, not decorative. The image's Dockerfile ends
+        # with `USER pulseguard` — a name — and the kubelet cannot prove a name
+        # is non-root without resolving it, so `runAsNonRoot: true` on its own
+        # fails the container with CreateContainerConfigError. Restating the
+        # UID numerically is what lets the check succeed, and it also means the
+        # pod refuses to start if the image's user ever silently changes.
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: control-api
+          # Immutable git-SHA tag, never :latest — this names the exact commit
+          # the image was built from, which is the question worth being able to
+          # answer when a pod misbehaves.
+          image: 423151037862.dkr.ecr.us-east-1.amazonaws.com/pulseguard-control-api:4970e68
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: pulseguard-config
+            - secretRef:
+                name: pulseguard-secrets
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              memory: "384Mi"
+              cpu: "200m"
+            limits:
+              # No CPU limit on purpose: throttling a JVM during startup makes
+              # a slow start slower, and this node runs few enough pods that
+              # the request is sufficient to protect them from each other.
+              memory: "768Mi"
+
+          # ---------------------------------------------------------------
+          # Probes
+          # ---------------------------------------------------------------
+          # All three use /actuator/health rather than the finer-grained
+          # /actuator/health/liveness and /actuator/health/readiness groups.
+          # That is forced, not preferred: SecurityConfig.java permits exactly
+          # "/actuator/health" and nothing beneath it, so the group endpoints
+          # answer 401 and the kubelet reads an authentication failure as an
+          # unhealthy container. Reaching them would mean editing Spring
+          # Security and rebuilding the image, which this stage avoids.
+          #
+          # A Spring Boot start that also runs Flyway is slow — measured at
+          # ~181s against RDS. The startupProbe exists so that slowness is not
+          # mistaken for failure: liveness does not begin evaluating until
+          # startup succeeds, so a cold start gets up to 5 minutes.
+          startupProbe:
+            httpGet:
+              path: /actuator/health
+              port: http
+            periodSeconds: 10
+            failureThreshold: 30
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /actuator/health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /actuator/health
+              port: http
+            periodSeconds: 20
+            timeoutSeconds: 5
+            # Deliberately slack. Because this is the aggregate health endpoint
+            # rather than a pure liveness group, it reports DOWN when the
+            # database is unreachable — and restarting the pod does not fix a
+            # database outage, it just adds a crash loop on top of one. Six
+            # failures at 20s means roughly two minutes of sustained trouble
+            # before a restart, which distinguishes a genuinely wedged JVM from
+            # a transient RDS blip.
+            failureThreshold: 6

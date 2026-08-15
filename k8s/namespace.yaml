@@ -1,0 +1,8 @@
+# Everything PulseGuard owns lives in one namespace, so the whole application
+# can be listed, described or deleted as a unit without touching kube-system.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: pulseguard
+  labels:
+    app.kubernetes.io/part-of: pulseguard

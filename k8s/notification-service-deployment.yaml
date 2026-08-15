@@ -1,0 +1,92 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notification-service
+  namespace: pulseguard
+  labels:
+    app: notification-service
+    app.kubernetes.io/part-of: pulseguard
+spec:
+  # ---------------------------------------------------------------------
+  # replicas: 0 — deployed but deliberately not running
+  # ---------------------------------------------------------------------
+  # This service exists only to consume incident events from Kafka and send
+  # email. Neither dependency exists in AWS:
+  #
+  #   * no Kafka   — MSK was dropped on cost (~$65-90/month, no free tier), no
+  #                  broker runs in this cluster, and the laptop's broker is
+  #                  not exposed to the internet
+  #   * no SMTP    — Mailpit is a local development mail sink and was not
+  #                  deployed here; SES was not configured
+  #
+  # A running replica would therefore do nothing but fail to connect in a loop
+  # and consume memory on a single-node cluster. The manifest is committed so
+  # the deployment shape is reviewable and so it can be scaled up the moment a
+  # broker exists, but the honest replica count today is zero.
+  #
+  # The full incident -> Kafka -> email flow remains demonstrable end to end on
+  # the local Docker stack, which is where it is verified.
+  replicas: 0
+  selector:
+    matchLabels:
+      app: notification-service
+  template:
+    metadata:
+      labels:
+        app: notification-service
+    spec:
+      securityContext:
+        # Numeric UID is required: the image ends with `USER pulseguard`, and
+        # the kubelet cannot verify a *name* is non-root, so runAsNonRoot alone
+        # fails with CreateContainerConfigError.
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: notification-service
+          image: 423151037862.dkr.ecr.us-east-1.amazonaws.com/pulseguard-notification-service:4970e68
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8082
+          envFrom:
+            - configMapRef:
+                name: pulseguard-config
+            - secretRef:
+                name: pulseguard-secrets
+          env:
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: "localhost:9092"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              memory: "384Mi"
+              cpu: "200m"
+            limits:
+              memory: "768Mi"
+          startupProbe:
+            httpGet:
+              path: /actuator/health
+              port: http
+            periodSeconds: 10
+            failureThreshold: 30
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /actuator/health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /actuator/health
+              port: http
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3

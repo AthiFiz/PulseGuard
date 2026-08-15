@@ -1,0 +1,100 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: monitor-worker
+  namespace: pulseguard
+  labels:
+    app: monitor-worker
+    app.kubernetes.io/part-of: pulseguard
+spec:
+  # ---------------------------------------------------------------------
+  # replicas: 1 — DO NOT INCREASE
+  # ---------------------------------------------------------------------
+  # Distributed worker coordination is not implemented yet. The scheduler
+  # claims due monitors without row-level locking, so a second replica would
+  # not share the work — it would duplicate it: two HTTP checks per monitor,
+  # two monitor_checks rows, and consecutive-failure counters advancing at
+  # twice the intended rate, which would fire incidents early.
+  #
+  # `SELECT ... FOR UPDATE SKIP LOCKED` is the planned fix and belongs to the
+  # multi-worker coordination stage. Until then this number stays at 1.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: monitor-worker
+  template:
+    metadata:
+      labels:
+        app: monitor-worker
+    spec:
+      securityContext:
+        # Numeric UID is required: the image ends with `USER pulseguard`, and
+        # the kubelet cannot verify a *name* is non-root, so runAsNonRoot alone
+        # fails with CreateContainerConfigError.
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: monitor-worker
+          image: 423151037862.dkr.ecr.us-east-1.amazonaws.com/pulseguard-monitor-worker:4970e68
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8081
+          envFrom:
+            - configMapRef:
+                name: pulseguard-config
+            - secretRef:
+                name: pulseguard-secrets
+          env:
+            # ---------------------------------------------------------------
+            # Kafka is intentionally unreachable from AWS
+            # ---------------------------------------------------------------
+            # PulseGuard's Kafka demonstration runs entirely on the local
+            # Docker stack. No MSK was created, no broker runs in this cluster,
+            # and the laptop's broker is deliberately NOT exposed to the
+            # internet. This value therefore points at nothing.
+            #
+            # That is safe by design: the worker treats a publish failure as
+            # non-fatal. Monitoring, monitor_checks, status transitions,
+            # incidents and outbox_events all continue to work; the outbox rows
+            # simply stay unpublished. See backend/monitor-worker
+            # application.yml, which documents the same behaviour.
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: "localhost:9092"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              memory: "384Mi"
+              cpu: "200m"
+            limits:
+              memory: "768Mi"
+
+          # This service exposes only `health` through Actuator — it has no
+          # liveness/readiness groups, so both probes use the same endpoint.
+          startupProbe:
+            httpGet:
+              path: /actuator/health
+              port: http
+            periodSeconds: 10
+            failureThreshold: 30
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /actuator/health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /actuator/health
+              port: http
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3

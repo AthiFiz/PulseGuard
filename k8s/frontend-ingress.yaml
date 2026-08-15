@@ -1,0 +1,58 @@
+# The only public entry point to PulseGuard.
+#
+# The AWS Load Balancer Controller watches this object and creates a real
+# Application Load Balancer from it. Deleting this Ingress deletes that ALB —
+# which is why cleanup starts here rather than with the cluster.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: frontend
+  namespace: pulseguard
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+
+    # Register pod IPs as ALB targets instead of node ports. Traffic goes
+    # ALB -> pod directly, so no NodePort is opened on the worker node.
+    alb.ingress.kubernetes.io/target-type: ip
+
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}]'
+
+    # "/" is the SPA's index.html and returns 200 without touching the
+    # database, so a struggling Control API does not take the frontend's ALB
+    # targets out of service.
+    alb.ingress.kubernetes.io/healthcheck-path: /
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: "15"
+    alb.ingress.kubernetes.io/healthy-threshold-count: "2"
+
+    # Stated explicitly rather than left to tag auto-discovery. Both are
+    # public subnets, in us-east-1a and us-east-1b — an ALB requires at least
+    # two Availability Zones.
+    alb.ingress.kubernetes.io/subnets: subnet-059da528efb4d9e9b,subnet-0e63bbae3a79b9845
+
+    # ---------------------------------------------------------------------
+    # Access restriction
+    # ---------------------------------------------------------------------
+    # Locked to the developer's address while testing. This is an unauthenticated
+    # HTTP endpoint on the public internet otherwise, and PulseGuard's own login
+    # page is not a reason to skip a network control.
+    #
+    # If this is widened for a supervised demonstration, record when and why,
+    # and restore the /32 afterwards.
+    alb.ingress.kubernetes.io/inbound-cidrs: 112.134.240.107/32
+
+    alb.ingress.kubernetes.io/tags: Project=PulseGuard,Stage=16
+spec:
+  ingressClassName: alb
+  rules:
+    - http:
+        paths:
+          # Everything, including /api, goes to the frontend. nginx inside that
+          # pod proxies /api to the control-api Service, so the browser only
+          # ever sees one origin and the API is never publicly routable.
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port:
+                  number: 80

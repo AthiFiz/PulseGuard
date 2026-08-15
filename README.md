@@ -631,6 +631,49 @@ credentials, the Sonar token, failure behaviour and troubleshooting — are in
 
 ---
 
+## AWS EKS Deployment
+
+PulseGuard also runs on Amazon EKS. It is a second deployment of the **same
+container images** Compose uses, with a production-shaped network around them:
+
+```text
+Internet → Application Load Balancer → private EKS pods → private RDS MySQL
+                                             │
+                                    outbound │ NAT Gateway → Internet Gateway
+```
+
+Everything that runs application code sits in private subnets with no public IP.
+The ALB is the only public entry point, and the RDS instance is not reachable
+from the internet at all.
+
+```bash
+# manifests live in k8s/ — plain YAML, no Helm chart
+aws eks update-kubeconfig --name pulseguard-eks --region us-east-1 --profile pulseguard
+kubectl config current-context          # always confirm before applying
+kubectl get pods -n pulseguard
+kubectl get ingress -n pulseguard       # ALB address appears here
+```
+
+Two things differ from local Docker, both deliberate:
+
+- **Kafka stays local.** Amazon MSK was dropped on cost, so
+  `notification-service` runs at `replicas: 0` in EKS and the full incident →
+  Kafka → email flow is demonstrated on Compose instead.
+- **`MONITOR_ALLOW_PRIVATE_ADDRESSES=false`.** Compose sets it `true` so a
+  local demo has something it is allowed to monitor; in a real VPC that would
+  let a monitor URL reach RDS and the Kubernetes API.
+
+> This is a short-lived demonstration environment and it costs real money —
+> roughly **$5–6/day** with the EKS control plane, one node, the NAT Gateway and
+> the ALB running. Tear it down when finished; the exact order matters and is in
+> [docs/aws.md](docs/aws.md).
+
+Deployment steps and per-manifest reasoning are in **[k8s/README.md](k8s/README.md)**.
+Cluster construction, networking, IAM and cost are in
+**[docs/aws.md](docs/aws.md)** and **[docs/kubernetes.md](docs/kubernetes.md)**.
+
+---
+
 ## Building the Frontend
 
 ```bash

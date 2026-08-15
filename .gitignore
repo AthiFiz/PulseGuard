@@ -53,3 +53,12 @@ yarn-error.log*
 AGENTS.md
 CLAUDE.md
 .claude/
+
+# --- Kubernetes / EKS runtime secrets ---
+# The real Secret is built at deploy time from AWS Secrets Manager and must
+# never be committed. k8s/secret.example.yaml is deliberately NOT ignored: it
+# holds placeholders only and documents the required keys.
+.env.eks
+k8s/secret.yaml
+k8s/secrets.local.yaml
+k8s/*.local.yaml
