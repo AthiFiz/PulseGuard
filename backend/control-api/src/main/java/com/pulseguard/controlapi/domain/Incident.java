@@ -51,7 +51,6 @@ public class Incident {
     @Column(name = "opened_at", nullable = false)
     private Instant openedAt;
 
-    /** Null while the incident is OPEN. */
     @Column(name = "resolved_at")
     private Instant resolvedAt;
 
