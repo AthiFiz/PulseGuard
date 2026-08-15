@@ -58,6 +58,14 @@ public class SecurityConfig {
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers(HttpMethod.POST, "/api/v1/auth/register", "/api/v1/auth/login")
                         .permitAll()
+                        // Exactly "/actuator/health" — nothing beneath it. The
+                        // finer-grained /actuator/health/liveness and
+                        // /actuator/health/readiness groups therefore answer 401,
+                        // and a Kubernetes probe reads that as an unhealthy
+                        // container rather than as an authentication problem.
+                        // The k8s manifests point every probe at this exact path
+                        // for that reason; widening this matcher is what a future
+                        // change would need to do to use the groups instead.
                         .requestMatchers(HttpMethod.GET, "/api/v1/system/info", "/actuator/health")
                         .permitAll()
                         // CORS preflight carries no credentials and must not 401.
