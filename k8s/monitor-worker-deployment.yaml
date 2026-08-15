@@ -48,22 +48,9 @@ spec:
                 name: pulseguard-config
             - secretRef:
                 name: pulseguard-secrets
-          env:
-            # ---------------------------------------------------------------
-            # Kafka is intentionally unreachable from AWS
-            # ---------------------------------------------------------------
-            # PulseGuard's Kafka demonstration runs entirely on the local
-            # Docker stack. No MSK was created, no broker runs in this cluster,
-            # and the laptop's broker is deliberately NOT exposed to the
-            # internet. This value therefore points at nothing.
-            #
-            # That is safe by design: the worker treats a publish failure as
-            # non-fatal. Monitoring, monitor_checks, status transitions,
-            # incidents and outbox_events all continue to work; the outbox rows
-            # simply stay unpublished. See backend/monitor-worker
-            # application.yml, which documents the same behaviour.
-            - name: KAFKA_BOOTSTRAP_SERVERS
-              value: "localhost:9092"
+          # Kafka now comes from the ConfigMap: Amazon MSK over TLS. Through
+          # Task 16 this was pinned to an unreachable localhost:9092, because
+          # no broker existed in AWS at all.
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:

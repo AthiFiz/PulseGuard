@@ -8,25 +8,18 @@ metadata:
     app.kubernetes.io/part-of: pulseguard
 spec:
   # ---------------------------------------------------------------------
-  # replicas: 0 — deployed but deliberately not running
+  # replicas: 1 — live since Task 17
   # ---------------------------------------------------------------------
-  # This service exists only to consume incident events from Kafka and send
-  # email. Neither dependency exists in AWS:
+  # This ran at zero through Task 16 because neither of its dependencies
+  # existed in AWS. Both now do:
   #
-  #   * no Kafka   — MSK was dropped on cost (~$65-90/month, no free tier), no
-  #                  broker runs in this cluster, and the laptop's broker is
-  #                  not exposed to the internet
-  #   * no SMTP    — Mailpit is a local development mail sink and was not
-  #                  deployed here; SES was not configured
+  #   * Kafka  — Amazon MSK, private, TLS on 9094
+  #   * SMTP   — Gmail, reached outbound through the NAT Gateway
   #
-  # A running replica would therefore do nothing but fail to connect in a loop
-  # and consume memory on a single-node cluster. The manifest is committed so
-  # the deployment shape is reviewable and so it can be scaled up the moment a
-  # broker exists, but the honest replica count today is zero.
-  #
-  # The full incident -> Kafka -> email flow remains demonstrable end to end on
-  # the local Docker stack, which is where it is verified.
-  replicas: 0
+  # Deliberately one replica. A second would consume from the same group and
+  # simply split partitions; there is no throughput problem to solve, and one
+  # consumer keeps the demonstration's ordering easy to reason about.
+  replicas: 1
   selector:
     matchLabels:
       app: notification-service
@@ -56,9 +49,11 @@ spec:
                 name: pulseguard-config
             - secretRef:
                 name: pulseguard-secrets
-          env:
-            - name: KAFKA_BOOTSTRAP_SERVERS
-              value: "localhost:9092"
+            # Gmail App Password lives in its own Secret so that rotating it
+            # never risks disturbing the database and JWT credentials.
+            # Created at deploy time; never committed.
+            - secretRef:
+                name: pulseguard-smtp-secrets
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:

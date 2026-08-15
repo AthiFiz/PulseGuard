@@ -474,31 +474,83 @@ incident id 1 · status OPEN · monitorId 3
 
 ---
 
-## The Kafka gap
+## Kafka and email (Stage 17)
 
-**No Kafka exists in AWS.** MSK was not created, no broker runs in the cluster,
-and the laptop's broker is not exposed to the internet.
-
-The worker's producer therefore cannot connect, and the logs say so plainly:
+Through Task 16 there was no broker in AWS at all: the worker's producer could
+not connect, the outbox accumulated unpublished rows, and
+`notification-service` ran at zero replicas. Stage 17 closed that gap with
+**Amazon MSK**.
 
 ```text
-Connection to node -1 (localhost/127.0.0.1:9092) could not be established.
-Bootstrap broker localhost:9092 disconnected
+monitor-worker ──TLS 9094──▶ Amazon MSK ──TLS 9094──▶ notification-service
+                             2 × t3.small                      │
+                             private subnets                   │ SMTP 587
+                                                               ▼
+                                                    NAT ─▶ smtp.gmail.com
 ```
 
-This is not silently ignored and it is not fatal. The worker keeps monitoring
-throughout — 0 restarts, checks still recorded every 60 s — because publication
-failure is designed to be non-fatal and the transactional outbox simply
-accumulates unpublished rows.
+### What changed in the manifests
 
-**The incident → Kafka → notification flow was NOT demonstrated on AWS.** It
-works end to end on Docker Compose, which remains the complete environment for
-that part of the system. `notification-service` runs at zero replicas here for
-exactly this reason.
+| | Task 16 | Task 17 |
+| --- | --- | --- |
+| `KAFKA_BOOTSTRAP_SERVERS` | `localhost:9092` (unreachable, deliberate) | MSK TLS bootstrap |
+| `SPRING_KAFKA_PROPERTIES_SECURITY_PROTOCOL` | unset (PLAINTEXT) | `SSL` |
+| `KAFKA_INCIDENT_TOPIC_REPLICATION` | unset (1) | `2` |
+| `notification-service` replicas | `0` | `1` |
+| SMTP settings | none | `MAIL_*` in ConfigMap + Secret |
 
-One observation worth recording: with no broker, the producer re-bootstraps
-roughly every 50 ms, which is noisy in the logs and burns a little CPU. Harmless
-over three days; it would want a backoff before anything longer-lived.
+**No application code changed.** Every one of those was already an environment
+variable with a sensible default, which is exactly what made a
+configuration-only migration possible. The images are the same ones Task 16
+deployed.
+
+### The SMTP credential
+
+The Gmail App Password lives in its own Secret, `pulseguard-smtp-secrets`, kept
+separate from `pulseguard-secrets` so rotating the mail credential cannot
+disturb the database password or JWT signing key.
+
+```bash
+printf "Gmail App Password: "; read -rs APP_PW; echo; APP_PW="${APP_PW// /}"
+kubectl create secret generic pulseguard-smtp-secrets -n pulseguard \
+  --from-literal=MAIL_USERNAME=athif.rasheedh@gmail.com \
+  --from-literal=MAIL_PASSWORD="$APP_PW" \
+  --dry-run=client -o yaml | kubectl apply -f -
+unset APP_PW
+```
+
+`read -rs` echoes nothing, no manifest is written to disk, and the variable is
+unset immediately — so the password never enters a file, a screen, or shell
+history. A normal Google account password is never used; an App Password is a
+separate 16-character credential that can be revoked on its own.
+
+Mail health checks stay disabled (`management.health.mail.enabled=false`), so an
+SMTP outage marks deliveries as failed rather than making the service itself
+unhealthy and triggering pointless restarts.
+
+### Outbound SMTP path
+
+`notification-service` sits on a private node with no public IP, so its mail
+traffic leaves the same way everything else does:
+
+```text
+notification-service ─▶ private node ─▶ NAT Gateway ─▶ smtp.gmail.com:587
+```
+
+No inbound rule is required — SMTP here is strictly outbound.
+
+### Kafka troubleshooting
+
+| Symptom | Likely cause |
+| --- | --- |
+| `Connection to node -1 could not be established` | Wrong bootstrap string, or `pulseguard-msk-sg` does not admit the node's SG |
+| TLS handshake failure | `SPRING_KAFKA_PROPERTIES_SECURITY_PROTOCOL` not `SSL` — the client is speaking plaintext to a TLS-only listener |
+| Topic creation times out | Replication factor exceeds available brokers |
+| Consumer idle, no records | Group already committed past them: `kafka-consumer-groups.sh --describe` |
+| Events published, no email | Kafka is fine — inspect `notification_deliveries.status` |
+
+Brokers are unreachable from a laptop by design. To inspect topics, run a
+temporary Kafka CLI pod inside the cluster — see [`msk.md`](msk.md).
 
 ---
 
