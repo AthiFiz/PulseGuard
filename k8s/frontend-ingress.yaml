@@ -32,13 +32,14 @@ metadata:
     # ---------------------------------------------------------------------
     # Access restriction
     # ---------------------------------------------------------------------
-    # Locked to the developer's address while testing. This is an unauthenticated
-    # HTTP endpoint on the public internet otherwise, and PulseGuard's own login
-    # page is not a reason to skip a network control.
+    # Deliberately open, for a supervised demonstration that must work from any
+    # network. This is the one component where that is defensible: it is the
+    # application's own front door, everything behind it requires a login, and
+    # the Control API is not routable through it.
     #
-    # If this is widened for a supervised demonstration, record when and why,
-    # and restore the /32 afterwards.
-    alb.ingress.kubernetes.io/inbound-cidrs: 112.134.240.107/32
+    # It is still HTTP, so credentials cross the network in clear. Restore a /32
+    # here, or put TLS in front, for anything longer-lived than the demo.
+    alb.ingress.kubernetes.io/inbound-cidrs: 0.0.0.0/0
 
     alb.ingress.kubernetes.io/tags: Project=PulseGuard,Stage=16
 spec:

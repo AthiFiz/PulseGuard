@@ -1,0 +1,64 @@
+# Public access to Grafana, for a demonstration.
+#
+# WHY THIS EXISTS
+# ---------------
+# Grafana is normally reached with `kubectl port-forward`, which needs a
+# terminal open and a working kubeconfig. That is fine for an operator and
+# awkward mid-presentation, so this gives it a URL.
+#
+# WHY IT IS A SEPARATE LOAD BALANCER
+# ----------------------------------
+# The obvious cheaper option is an Ingress *group*, which lets several Ingresses
+# share one ALB. It was rejected: the application's Ingress does not currently
+# belong to a group, and adding it to one makes the controller provision a new
+# load balancer with a new DNS name — breaking the URL the application is
+# demonstrated on. A second ALB costs about $0.55/day and changes nothing that
+# already works.
+#
+# WHY EXPOSING GRAFANA IS DEFENSIBLE AND EXPOSING THE DATABASE IS NOT
+# -------------------------------------------------------------------
+# Grafana authenticates every request and anonymous access is disabled, so what
+# is published is a login page. A database has no such layer — an open port 3306
+# is found by automated scanners within minutes — which is why RDS stays private
+# and is reached through a tunnel instead.
+#
+# Still: this is HTTP, so the Grafana password crosses the network in clear.
+# Delete this file's Ingress when the demonstration is over.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: grafana
+  namespace: monitoring
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}]'
+
+    # Grafana answers /api/health without authentication, which makes it a
+    # better health check than "/" — that redirects to /login, and a redirect
+    # is a less definite statement that the process is actually working.
+    alb.ingress.kubernetes.io/healthcheck-path: /api/health
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: "15"
+    alb.ingress.kubernetes.io/healthy-threshold-count: "2"
+
+    # The same two public subnets the application's load balancer uses. Named
+    # explicitly rather than left to tag discovery, so a failure is obvious.
+    alb.ingress.kubernetes.io/subnets: subnet-059da528efb4d9e9b,subnet-0e63bbae3a79b9845
+
+    # Open, deliberately, so the dashboard can be shown from any network.
+    # Restore a /32 here after the demonstration.
+    alb.ingress.kubernetes.io/inbound-cidrs: 0.0.0.0/0
+
+    alb.ingress.kubernetes.io/tags: Project=PulseGuard,Purpose=demo-grafana
+spec:
+  ingressClassName: alb
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: pulseguard-monitoring-grafana
+                port:
+                  number: 80
