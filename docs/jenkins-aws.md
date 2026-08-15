@@ -230,6 +230,34 @@ cannot walk away with every credential in the namespace.
 > from `CONFIG_MAP` to `API_AND_CONFIG_MAP`. That is additive: existing
 > `aws-auth` mappings keep working.
 
+### Reaching the API server at all
+
+IAM and RBAC decide what Jenkins may *do*. Neither gets a packet to the control
+plane, and the first real pipeline run failed on exactly that:
+
+```text
+dial tcp 10.0.13.250:443: i/o timeout
+```
+
+Jenkins runs **inside** the VPC, so the cluster endpoint resolves to the control
+plane's *private* ENI addresses rather than the public one. Two consequences,
+both easy to miss:
+
+- the public endpoint allowlist is irrelevant to Jenkins — it never uses that
+  path, so adding the Elastic IP there would not have helped
+- the **cluster security group** must admit Jenkins on 443, because that is the
+  path actually taken
+
+```bash
+aws ec2 authorize-security-group-ingress --group-id <eks-cluster-sg> \
+  --ip-permissions "IpProtocol=tcp,FromPort=443,ToPort=443,\
+UserIdGroupPairs=[{GroupId=<jenkins-sg>,Description='Jenkins CI to EKS API (private endpoint)'}]"
+```
+
+This is also the better arrangement: control-plane traffic stays inside the VPC
+instead of leaving through the NAT Gateway and coming back via the public
+endpoint.
+
 ---
 
 ## GitHub webhook

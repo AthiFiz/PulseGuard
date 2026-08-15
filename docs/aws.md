@@ -547,6 +547,36 @@ commands and troubleshooting — is in **[msk.md](msk.md)**.
 
 ---
 
+## Stage 18 — cloud CI/CD
+
+A dedicated EC2 instance replaces the laptop as the thing that builds and
+deploys PulseGuard.
+
+```text
+pulseguard-jenkins   i-021bbb5899746db16
+  t3.medium · Amazon Linux 2023 · 30 GiB gp3 · public subnet A
+  Elastic IP 54.172.12.167 · Jenkins 2.568.2 LTS
+  security group  pulseguard-jenkins-sg
+      8080 from the developer /32        (UI)
+      8080 from GitHub's hook CIDRs      (webhook)
+      no inbound SSH — Session Manager instead
+  IAM   PulseGuardJenkinsRole via instance profile — no static AWS keys
+```
+
+`git push` is the whole developer workflow: GitHub calls the webhook, Jenkins
+detects which component's paths changed, and tests, builds, pushes and rolls out
+only that component. A Control API commit never rebuilds the frontend.
+
+One extra rule was needed on the **EKS cluster** security group: Jenkins sits
+inside the VPC, so the cluster endpoint resolves to the control plane's private
+addresses, and 443 must be allowed from the Jenkins security group. Full detail
+in **[jenkins-aws.md](jenkins-aws.md)**.
+
+> Adds roughly **$1.20/day** (instance, EBS, Elastic IP), taking the whole
+> environment to about **$9/day**.
+
+---
+
 ## Tearing down Stage 16
 
 **Order matters.** These resources bill by the hour and some of them are created
