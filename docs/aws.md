@@ -1,8 +1,8 @@
 # PulseGuard — AWS Runbook
 
-The cloud foundation PulseGuard is deployed onto. This document covers **Stage
-15A: the network and the image registry** — what exists, why it is shaped that
-way, what it costs, and how to remove it.
+The cloud foundation PulseGuard is deployed onto — what exists, why it is shaped
+that way, what it costs, and how to remove it. It covers Stages **15A** (network
+and registry), **15B** (RDS), **15D** (images), **16** (EKS) and **17** (MSK).
 
 ```text
 Account   423151037862  ("athif-aws")
@@ -22,6 +22,11 @@ Profile   pulseguard        (aws --profile pulseguard ...)
 - [What this costs](#what-this-costs)
 - [Tearing it down](#tearing-it-down)
 - [Doing it by hand in the console](#doing-it-by-hand-in-the-console)
+- [Stage 15B — RDS MySQL](#stage-15b--rds-mysql)
+- [Stage 15D — images in ECR](#stage-15d--images-in-ecr)
+- [Stage 16 — EKS, NAT and the RDS privacy correction](#stage-16--eks-nat-and-the-rds-privacy-correction)
+- [Stage 17 — Amazon MSK](#stage-17--amazon-msk)
+- [Tearing down Stage 16](#tearing-down-stage-16)
 - [What comes next](#what-comes-next)
 
 ---
@@ -503,6 +508,45 @@ password and roughly ten more minutes.
 
 ---
 
+## Stage 17 — Amazon MSK
+
+The gap Stage 16 left open: with no broker in AWS, incident events accumulated
+unpublished in the outbox and `notification-service` ran at zero replicas. MSK
+closes it.
+
+```text
+pulseguard-msk
+  kafka version   3.9.x            (ZooKeeper metadata — see below)
+  brokers         2 × kafka.t3.small, one per AZ
+  storage         10 GiB EBS each
+  subnets         private A + private B  (same as EKS and RDS)
+  security group  pulseguard-msk-sg → tcp/9094 from the EKS cluster SG only
+  encryption      TLS in transit · AWS-managed KMS at rest
+  public access   disabled
+  authentication  none — TLS transport only
+```
+
+**KRaft was not available at this price.** AWS rejects `kafka.t3.small` on
+`3.9.x.kraft`; that combination starts at `m5.large`/`m7g.large`, which is
+roughly **four times** the daily cost. ZooKeeper mode was chosen deliberately to
+keep a short-lived demonstration affordable. Nothing in the application is aware
+of the difference.
+
+**The brokers are unauthenticated**, which is safe here only because they have
+no public endpoint and their security group admits exactly one source — the EKS
+nodes. That is a private demo architecture, **not** a production security model;
+a real deployment would add SASL/IAM so that network position alone is not
+authorisation.
+
+Full detail — topic configuration, producer and consumer settings, verification
+commands and troubleshooting — is in **[msk.md](msk.md)**.
+
+> **MSK Provisioned has no stopped state.** Unlike EC2 you cannot pause it; the
+> only way to stop paying is to delete the cluster. It adds roughly
+> **$2.25/day**, taking the total AWS burn to about **$8/day**.
+
+---
+
 ## Tearing down Stage 16
 
 **Order matters.** These resources bill by the hour and some of them are created
@@ -526,16 +570,22 @@ aws eks delete-nodegroup --cluster-name pulseguard-eks --nodegroup-name pulsegua
 aws eks wait nodegroup-deleted --cluster-name pulseguard-eks --nodegroup-name pulseguard-nodegroup --profile pulseguard
 aws eks delete-cluster --name pulseguard-eks --profile pulseguard
 
-# 5. NAT Gateway — deleting EKS does NOT remove it
+# 5. MSK — no stopped state; deleting is the only way to stop paying.
+#    Its security group cannot go until the broker ENIs are released, so the
+#    group deletion comes after the cluster is fully gone.
+aws kafka delete-cluster --cluster-arn "$MSK_ARN" --profile pulseguard
+aws ec2 delete-security-group --group-id <pulseguard-msk-sg> --profile pulseguard
+
+# 6. NAT Gateway — deleting EKS does NOT remove it
 aws ec2 delete-nat-gateway --nat-gateway-id nat-00046ef0fb9fab41c --profile pulseguard
 # wait for state "deleted", then release the address
 aws ec2 release-address --allocation-id eipalloc-04b5c7013b421c2f7 --profile pulseguard
 
-# 6. the private default routes now point at a deleted gateway
+# 7. the private default routes now point at a deleted gateway
 aws ec2 delete-route --route-table-id rtb-01833270597ac1f15 --destination-cidr-block 0.0.0.0/0 --profile pulseguard
 aws ec2 delete-route --route-table-id rtb-01253ba60d051a4fb --destination-cidr-block 0.0.0.0/0 --profile pulseguard
 
-# 7. RDS — stop (max 7 days) or delete
+# 8. RDS — stop (max 7 days) or delete
 aws rds delete-db-instance --db-instance-identifier pulseguard-mysql \
   --skip-final-snapshot --delete-automated-backups --profile pulseguard
 ```

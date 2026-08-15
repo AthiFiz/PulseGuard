@@ -926,13 +926,41 @@ exists.
                               (public subnet A, one only)
 ```
 
-### What is deliberately absent
+### The event path, completed in Stage 17
 
-**No Kafka.** Amazon MSK was dropped on cost and no broker runs in the cluster.
-The worker treats an unreachable broker as non-fatal, so monitoring, incidents
-and `outbox_events` all work in EKS — the outbox simply accumulates unpublished
-rows. The full incident → Kafka → email path is demonstrated on Compose, not
-here, and `notification-service` therefore runs at zero replicas.
+Stage 16 left the event-driven half of the system unfinished in AWS: no broker
+existed, so the outbox accumulated unpublished rows and `notification-service`
+ran at zero replicas. **Amazon MSK closed that gap**, and the full path now runs
+in the cloud:
+
+```text
+                 Internet
+                    │
+                    ▼
+                   ALB
+                    │
+              Private EKS
+          ┌─────────┼──────────┐
+          │         │          │
+      Frontend  Control API  Monitor Worker
+                    │          │
+                    ▼          ▼
+                   RDS      Amazon MSK          2 × kafka.t3.small
+                               │                private subnets, TLS 9094
+                               ▼
+                       Notification Service
+                               │  SMTP 587 via NAT
+                               ▼
+                          Gmail SMTP
+                               │
+                               ▼
+                           Recipient
+```
+
+The producer and consumer code is unchanged from the local Docker deployment —
+only configuration differs. Brokers, topic replication and transport security
+are all environment variables, so the same images run against a single
+PLAINTEXT broker on a laptop and a two-broker TLS cluster in AWS.
 
 **No NodePort and no public node IPs.** The ALB registers pod IPs directly
 (`target-type: ip`), so nothing needs to listen on a node address. The worker

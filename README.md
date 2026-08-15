@@ -654,23 +654,44 @@ kubectl get pods -n pulseguard
 kubectl get ingress -n pulseguard       # ALB address appears here
 ```
 
-Two things differ from local Docker, both deliberate:
+The event-driven path runs in AWS too, on **Amazon MSK**:
 
-- **Kafka stays local.** Amazon MSK was dropped on cost, so
-  `notification-service` runs at `replicas: 0` in EKS and the full incident →
-  Kafka → email flow is demonstrated on Compose instead.
-- **`MONITOR_ALLOW_PRIVATE_ADDRESSES=false`.** Compose sets it `true` so a
-  local demo has something it is allowed to monitor; in a real VPC that would
-  let a monitor URL reach RDS and the Kubernetes API.
+```text
+Monitor Worker → outbox → Amazon MSK (TLS) → Notification Service → Gmail SMTP → inbox
+```
+
+MSK is two `kafka.t3.small` brokers in the private subnets, TLS-only on 9094,
+reachable from the EKS nodes and nothing else. Notification emails are sent
+through Gmail SMTP outbound via the NAT Gateway, authenticated with a Google App
+Password held in a Kubernetes Secret.
+
+**No application code differs between local and AWS.** Broker addresses,
+transport security and topic replication are all environment variables, so the
+same images run against a single PLAINTEXT broker on a laptop and a two-broker
+TLS cluster in the cloud:
+
+| | Local Docker | AWS |
+| --- | --- | --- |
+| Kafka | `kafka:29092`, PLAINTEXT | MSK bootstrap, `SSL` |
+| Replication factor | 1 | 2 |
+| Mail | Mailpit sink | Gmail SMTP |
+| `MONITOR_ALLOW_PRIVATE_ADDRESSES` | `true` | **`false`** |
+
+That last one matters: Compose sets it `true` so a local demo has something it
+is allowed to monitor, whereas in a real VPC it would let a monitor URL reach
+RDS and the Kubernetes API.
 
 > This is a short-lived demonstration environment and it costs real money —
-> roughly **$5–6/day** with the EKS control plane, one node, the NAT Gateway and
-> the ALB running. Tear it down when finished; the exact order matters and is in
+> roughly **$8/day** with the EKS control plane, one node, the NAT Gateway, the
+> ALB and MSK running. **MSK Provisioned cannot be stopped**, only deleted. Tear
+> it all down when finished; the order matters and is in
 > [docs/aws.md](docs/aws.md).
 
 Deployment steps and per-manifest reasoning are in **[k8s/README.md](k8s/README.md)**.
 Cluster construction, networking, IAM and cost are in
 **[docs/aws.md](docs/aws.md)** and **[docs/kubernetes.md](docs/kubernetes.md)**.
+Managed Kafka — topic, TLS, producer/consumer configuration and troubleshooting
+— is in **[docs/msk.md](docs/msk.md)**.
 
 ---
 

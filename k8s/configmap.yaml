@@ -18,7 +18,42 @@ data:
   # origin, so no cross-origin request is ever made and this value is not
   # load-bearing in this deployment. It is set to the ALB rather than left
   # blank so that a direct API call from the same host is not rejected.
-  FRONTEND_ORIGIN: "http://k8s-pulsegua-frontend-placeholder"
+  FRONTEND_ORIGIN: "http://k8s-pulsegua-frontend-3f2f4688ff-1943409317.us-east-1.elb.amazonaws.com"
+
+  # Incident emails contain a link back to the incident. It has to be an
+  # address the reader's browser can actually resolve, so it is the ALB —
+  # "http://frontend" would only work inside the cluster, which is the one
+  # place the recipient is not.
+  FRONTEND_BASE_URL: "http://k8s-pulsegua-frontend-3f2f4688ff-1943409317.us-east-1.elb.amazonaws.com"
+
+  # ---------------------------------------------------------------------
+  # Kafka — Amazon MSK, private, TLS
+  # ---------------------------------------------------------------------
+  # Broker DNS names are deployment configuration, not application code and
+  # not a credential: the brokers sit in private subnets and their security
+  # group admits only the EKS nodes, so knowing the name grants nothing.
+  KAFKA_BOOTSTRAP_SERVERS: "b-1.pulseguardmsk.ipl9au.c1.kafka.us-east-1.amazonaws.com:9094,b-2.pulseguardmsk.ipl9au.c1.kafka.us-east-1.amazonaws.com:9094"
+
+  # MSK accepts only TLS on 9094; there is no plaintext listener. Spring Kafka
+  # reads this as a plain client property and the JVM's default CA trust store
+  # validates Amazon's broker certificates, so no custom truststore is needed.
+  SPRING_KAFKA_PROPERTIES_SECURITY_PROTOCOL: "SSL"
+
+  # Two brokers, so the topic can afford two replicas. Local Docker runs a
+  # single broker and keeps the default of 1 — this value is why that still
+  # works without any code change.
+  KAFKA_INCIDENT_TOPIC_REPLICATION: "2"
+
+  # ---------------------------------------------------------------------
+  # Outbound email — Gmail SMTP through the NAT Gateway
+  # ---------------------------------------------------------------------
+  # Non-secret settings only. The Gmail App Password lives in the separate
+  # Secret `pulseguard-smtp-secrets`, alongside the username it authenticates.
+  MAIL_HOST: "smtp.gmail.com"
+  MAIL_PORT: "587"
+  MAIL_SMTP_AUTH: "true"
+  MAIL_SMTP_STARTTLS_ENABLE: "true"
+  MAIL_FROM: "athif.rasheedh@gmail.com"
 
   # ---------------------------------------------------------------------
   # SSRF policy — the single most important difference from local Docker

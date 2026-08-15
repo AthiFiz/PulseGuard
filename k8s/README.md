@@ -84,9 +84,25 @@ implemented. A second replica would duplicate every HTTP check and advance
 consecutive-failure counters at twice the intended rate, firing incidents early.
 Scale the frontend or Control API instead.
 
-**`notification-service` runs at `replicas: 0`.** It consumes Kafka and sends
-email; neither exists in AWS. Kafka stays local, so the notification flow is
-demonstrated on Docker Compose, not here.
+**`notification-service` runs at `replicas: 1` since Task 17.** It consumes from
+Amazon MSK over TLS and sends real email through Gmail SMTP, reached outbound
+via the NAT Gateway. Through Task 16 it ran at zero because neither dependency
+existed in AWS.
+
+**The SMTP App Password is a separate Secret.** `pulseguard-smtp-secrets` is
+kept apart from `pulseguard-secrets` so rotating the mail credential cannot
+disturb the database password or JWT signing key:
+
+```bash
+printf "Gmail App Password: "; read -rs APP_PW; echo; APP_PW="${APP_PW// /}"
+kubectl create secret generic pulseguard-smtp-secrets -n pulseguard \
+  --from-literal=MAIL_USERNAME=athif.rasheedh@gmail.com \
+  --from-literal=MAIL_PASSWORD="$APP_PW" \
+  --dry-run=client -o yaml | kubectl apply -f -
+unset APP_PW
+```
+
+Read silently, never written to a file, never in shell history.
 
 **The frontend nginx config is overridden.** The image's own config uses
 `resolver 127.0.0.11` — Docker's embedded DNS, which does not exist in a pod.
